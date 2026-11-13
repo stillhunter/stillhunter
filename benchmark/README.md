@@ -1,0 +1,28 @@
+# Benchmark
+
+The planted-bug benchmark for Stillhunter. It is never published to npm.
+
+## Commands
+
+```sh
+npm run bench -- materialize <app> <feature> [<bug>] [--work-dir <dir>] [--no-install] [--ports <web>,<api>]
+npm run bench -- materialize-base <app> [--work-dir <dir>] [--no-install]
+npm run bench -- lint [<app> ...]
+```
+
+`materialize` turns committed patches into a fresh repository: base as one "Initial commit" on `main`, the feature (and the bug, for a buggy variant) as uncommitted changes, and the feature's `request.md` as an untracked `.stillhunter/specs/request.txt`. `lint` runs the portability rules and the hint lint. `--ports` moves the app to other ports, rewriting the app's own web and API port numbers in the materialised copy (lockfiles are left alone), so several copies can run at once.
+
+`comparison/` runs Stillhunter and plain Claude Code on these apps, judges their findings blind and verifies them. The Stillhunter arm never runs from this checkout: each schedule packs the plugin with `npm pack`, unpacks it with its production dependencies into a folder outside the repository and points `--plugin-dir` there, and a trial refuses a plugin folder inside the repository or holding a `benchmark/` folder, so the plugin the hunter runs from holds no answer key. Its guard also refuses the hunter's Read, Grep and Glob in `benchmark/apps/`, `benchmark/comparison/` and Claude Code's session transcripts, and holds its Grep and Glob to the variant repository, so no search reaches the checkouts; a file elsewhere on the machine whose path the hunter guesses, such as a copy of a bug outside those folders, is not covered. Set `BENCH_WORK` to a folder outside the repository; `BENCH_PLUGIN_DIR` reuses a copy already unpacked. A run that leaves no `findings.json` is reported as failed and counted as not finding its bug; `finish`'s duration is kept in each trial's `meta.json`. Its first use, when the engine was rough-ride's `/rough-ride:hunt`, is reported in [rough-ride's REPORT-hunt.md](https://github.com/rough-ride/rough-ride/blob/main/benchmark/comparison/REPORT-hunt.md).
+
+## Port registry
+
+Web is `37NN` and API is `87NN`, where NN is the app number. These stay clear of 3000, 3731, 5173, 8000, 8080 and 8731.
+
+| NN | App | Web | API |
+|---|---|---|---|
+| 00 | fixture (the bench script's own tests; never scored) | 3700 | 8700 |
+| 01 | garden-log (dev split, Nuxt 4 + FastAPI; the three-OS CI app) | 3701 | 8701 |
+| 02 | dev-split Next.js | 3702 | 8702 |
+| 03 | dev-split Vite + React + Express | 3703 | 8703 |
+| 04 to 19 | test-split apps, assigned when admitted | 37NN | 87NN |
+| 90 to 99 | comparison lanes (`comparison/lib.mjs` `lanePorts`), copies of an app moved with `--ports` | 3790 to 3799 | 8790 to 8799 |
