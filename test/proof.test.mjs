@@ -9,7 +9,9 @@ import path from 'node:path';
 import { describe, test } from 'node:test';
 import { DECOY, HUNT, hunt, makeRepo, noBrowser, probe, runIdOf, SIGN_IN, SIGNIN_PROBE, startFixture } from './helpers.mjs';
 
-const WALL_SECONDS = 90;
+// Room for the two probes proved first, each re-run after a reset and a
+// sign-in, on a slow CI runner, and for the hanging re-run to start after them.
+const WALL_SECONDS = 150;
 
 const EMPTY = `export default async function (rr) {
   const f = await rr.fault('**/api/items', 500);
