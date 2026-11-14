@@ -62,7 +62,9 @@ jobs:
           mkdir unpacked && tar -xzf tarball/stillhunter-*.tgz -C unpacked
           (cd unpacked/package && npm install --omit=dev --ignore-scripts --no-audit --no-fund)
           claude plugin validate --strict unpacked/package
-          node unpacked/package/dist/hunt.mjs bogus | grep -q 'Usage:'
+          # An unknown command prints the usage to stderr and exits 1.
+          if out=$(node unpacked/package/dist/hunt.mjs bogus 2>&1); then echo 'expected a nonzero exit'; exit 1; fi
+          grep -q 'Usage:' <<<"$out"
 
   publish:
     needs: [pack, test-tarball]
