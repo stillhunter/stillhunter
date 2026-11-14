@@ -2,11 +2,11 @@
 // may take before the wall limit, and the --proof-seconds flag; how it labels
 // each claim from its two re-runs; and which probe signs in again.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { FINISH_WALL_SECONDS, judge, PROOF_SECONDS, proofOrder, proofSeconds, runTimeout, signInLine, WALL_ENV, wallSeconds } from '../dist/finish.mjs';
+import { FINISH_WALL_SECONDS, judge, PROOF_SECONDS, proofOrder, proofSeconds, runTimeout, signInLine, WALL_ENV, wallSeconds, writeWhole } from '../dist/finish.mjs';
 import { PROBE_TIMEOUT_MS } from '../dist/probe-host.mjs';
 import { signInProbe } from '../dist/results.mjs';
 
@@ -153,4 +153,21 @@ test('the sign-in probe is the latest that saved a session and ended without an 
   // One that ended cleanly wins over a later one that failed after saving.
   result('relogin', { savedSession: true, error: 'Error: later', finishedAt: 5 });
   assert.equal(signInProbe(dir), 'signin');
+});
+
+test('a report is written whole, and a rename the system refuses for a moment is tried again', (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'sh-whole-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'findings.json');
+  let refusals = 2;
+  writeWhole(file, 'one', (from, to) => {
+    if (refusals-- > 0) throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    renameSync(from, to);
+  });
+  assert.equal(readFileSync(file, 'utf8'), 'one');
+  assert.equal(refusals, -1);
+  // Another error, or one that does not pass, is thrown.
+  assert.throws(() => writeWhole(file, 'two', () => { throw Object.assign(new Error('no space'), { code: 'ENOSPC' }); }), /no space/);
+  assert.throws(() => writeWhole(file, 'two', () => { throw Object.assign(new Error('still busy'), { code: 'EBUSY' }); }), /still busy/);
+  assert.equal(readFileSync(file, 'utf8'), 'one');
 });

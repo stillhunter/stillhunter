@@ -62,10 +62,21 @@ export function wallSeconds(env: NodeJS.ProcessEnv = process.env): number {
 
 // A file written whole or not at all: a finish stopped while writing leaves
 // the previous version, never a truncated one.
-function writeWhole(file: string, text: string): void {
+export function writeWhole(file: string, text: string, rename: (from: string, to: string) => void = renameSync): void {
   const temp = `${file}.${process.pid}.tmp`;
   writeFileSync(temp, text);
-  renameSync(temp, file);
+  // On Windows a rename onto a file another process has open (a reader, or a
+  // virus scanner looking at it) fails for a moment with EPERM, EACCES or
+  // EBUSY, so it is tried again for up to about 2 s.
+  for (let wait = 10; ; wait *= 2) {
+    try {
+      return rename(temp, file);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (wait > 1000 || !['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '')) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+    }
+  }
 }
 
 // Claimed probes in the order they are proved: by the most severe finding
