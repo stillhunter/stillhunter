@@ -134,6 +134,12 @@ export function signInVariableNames(env: NodeJS.ProcessEnv = process.env): strin
 export const severityOf = (s: unknown): Severity => (SEVERITIES.includes(String(s ?? '').toLowerCase() as Severity) ? (String(s).toLowerCase() as Severity) : 'medium');
 export const atOrAbove = (s: Severity, min: Severity) => SEVERITIES.indexOf(s) <= SEVERITIES.indexOf(min);
 
+// An error on one line, short enough to read in a report.
+export function brief(text: string, max = 300): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > max ? `${line.slice(0, max)}…` : line;
+}
+
 export function minutesAndSeconds(seconds: number): string {
   return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
 }

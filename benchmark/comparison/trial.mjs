@@ -1,13 +1,49 @@
 // One trial: node benchmark/comparison/trial.mjs <feature> <bug|clean> <arm> <n> <lane>
 // Builds a fresh variant on the lane's ports, starts and seeds the app, runs
 // one arm headless, then keeps everything the run left behind.
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { loadavg } from 'node:os';
 import path from 'node:path';
 import {
-  ALL_ARMS, checkPluginDir, copyTranscripts, lanePorts, materializeVariant, mcpConfig, MODEL, newSessionId, outsideRepo, preparePlugin, prompt, RESULTS,
+  ALL_ARMS, checkPluginDir, copyTranscripts, HERE, lanePorts, materializeVariant, mcpConfig, MODEL, newSessionId, outsideRepo, preparePlugin, prompt, RESULTS,
   runClaude, scrubPaths, seed, sh, startApp, transcriptUsage, trialId, VARIANTS,
 } from './lib.mjs';
+
+export const SEED = path.join(HERE, 'seed.mjs');
+
+// Stillhunter resets app data before every probe and every proof re-run. The
+// app's own reset leaves only the demo user, while the trial seeds sample
+// data after the app starts, so the arm's reset seeds that data again: each
+// probe and each re-run starts from the data the hunt started from. The reset
+// runs a copy of seed.mjs kept in the trial's folder, as the hunter can read
+// the config and must find no path into this repository there. Other keys of
+// the variant's config are kept.
+export function writeResetConfig(repo, lane, feature, work) {
+  const seedCopy = path.join(work, 'seed.mjs');
+  copyFileSync(SEED, seedCopy);
+  const file = path.join(repo, '.stillhunter', 'config.json');
+  const config = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+  config.reset = `npm run reset && node "${seedCopy}" ${lane} ${feature}`;
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(config, null, 2) + '\n');
+  return config;
+}
+
+// One trial's folder, outside the repository: named at random, since the arm
+// works inside it and sees its path, which must not name the feature or the
+// bug. In it, the arm's scratch and output folders, and the variant, with the
+// seeding reset for the stillhunter arm.
+export function prepareTrial(arm, v, lane, parent, materialize = materializeVariant) {
+  if (!parent || !outsideRepo(parent)) throw new Error(`BENCH_WORK must be set to a folder outside the repository: ${parent}`);
+  mkdirSync(parent, { recursive: true });
+  const work = mkdtempSync(path.join(parent, 'trial-'));
+  const scratch = path.join(work, 'scratch');
+  const outDir = path.join(work, 'out');
+  mkdirSync(scratch); mkdirSync(outDir);
+  const repo = materialize(v, lane, path.join(work, 'variant'));
+  const reset = arm === 'stillhunter' ? writeResetConfig(repo, lane, v.feature, work).reset : null;
+  return { work, scratch, outDir, repo, reset };
+}
 
 // Each hunt run's findings.json, parsed, or null when it is missing or cannot
 // be read (a finish killed while writing an older engine's report, say).
@@ -63,19 +99,15 @@ async function main([feature, bug, arm, n, laneText]) {
   if (existsSync(path.join(dest, 'meta.json'))) { console.log(`${id}: already done`); return 0; }
   rmSync(dest, { recursive: true, force: true });
   mkdirSync(dest, { recursive: true });
-  const work = path.join(process.env.BENCH_WORK, id);
-  // The variant and the plugin live outside the repository, where nothing
-  // the arm can read leads back to benchmark/apps.
-  if (!outsideRepo(work)) throw new Error(`BENCH_WORK must be outside the repository: ${work}`);
-  const scratch = path.join(work, 'scratch');
-  const outDir = path.join(work, 'out');
-  mkdirSync(scratch, { recursive: true }); mkdirSync(outDir, { recursive: true });
-
-  const meta = { id, ...v, arm, trial: Number(n), lane, ports: lanePorts(lane), model: MODEL, startedAt: new Date().toISOString() };
+  const meta = { id, ...v, arm, trial: Number(n), lane, ports: lanePorts(lane), model: MODEL, maxBudgetUsd: process.env.BENCH_MAX_BUDGET_USD ? Number(process.env.BENCH_MAX_BUDGET_USD) : null, startedAt: new Date().toISOString() };
   const t0 = Date.now();
-  const repo = materializeVariant(v, lane, path.join(work, 'variant'));
+  // The variant and the plugin live outside the repository, where nothing
+  // the arm can read leads back to benchmark/apps; meta.json alone ties the
+  // trial's folder to the trial.
+  const { work, scratch, outDir, repo, reset } = prepareTrial(arm, v, lane, process.env.BENCH_WORK);
   meta.materializeMs = Date.now() - t0;
   meta.repo = repo;
+  if (reset) meta.reset = reset;
   const stopApp = await startApp(repo, lane, path.join(dest, 'app.log'));
   try {
     await seed(lane, v.feature);

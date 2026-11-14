@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { coverage, endpointOf, foldPath } from '../dist/coverage.mjs';
+import { coverage, endpointOf, foldPath, pageOf } from '../dist/coverage.mjs';
 
 const T = 'http://localhost:3000';
 
@@ -55,4 +55,58 @@ test('page calls to non-loopback hosts the route blocked are not endpoints', () 
   }], T);
   assert.deepEqual(c.endpoints.map((e) => e.endpoint), ['GET /api/items', 'GET 127.0.0.1:8000/api/other']);
   assert.deepEqual(c.neverFaulted, ['GET /api/items', 'GET 127.0.0.1:8000/api/other']);
+});
+
+test('the dev server\'s own requests and pages are not coverage', () => {
+  for (const p of ['/__nuxt_dev__/error-overlay/3txzmn1dd2eod', '/__nuxt_devtools__/client', '/_nuxt/pages/index.vue', '/_nuxt/builds/meta/dev.json', '/__vite_ping', '/@vite/client', '/@fs/src/main.ts', '/@id/virtual:x', '/_next/static/chunks/app/page', '/_next/webpack-hmr', '/__nextjs_original-stack-frame', '/__webpack_hmr', '/sockjs-node/info', '/favicon.ico']) {
+    assert.equal(endpointOf('GET', `${T}${p}`, T), null, p);
+    assert.equal(pageOf(`${T}${p}`, T), null, p);
+  }
+  // Only a path that starts with one of them: the app's own routes stay, and
+  // so do framework paths that carry the app's data.
+  assert.equal(endpointOf('GET', `${T}/api/__nuxt`, T), 'GET /api/__nuxt');
+  assert.equal(endpointOf('GET', `${T}/nuxt/settings`, T), 'GET /nuxt/settings');
+  assert.equal(pageOf(`${T}/next/steps`, T), '/next/steps');
+  assert.equal(endpointOf('GET', `${T}/_next/data/abc123/orders/7.json?id=7`, T), 'GET /_next/data/abc123/orders/7.json');
+  assert.equal(endpointOf('GET', `${T}/_next/image?url=%2Fa.png&w=640`, T), 'GET /_next/image');
+  assert.equal(endpointOf('GET', `${T}/__nuxt_island/OrderCard_abc.json`, T), 'GET /__nuxt_island/OrderCard_abc.json');
+  const c = coverage([{
+    requests: [{ method: 'GET', url: `${T}/__nuxt_dev__/error-overlay/abc`, via: 'page' }, { method: 'GET', url: `${T}/api/items`, via: 'page' }],
+    faults: [],
+    pages: [{ id: 1, viewport: { width: 1280, height: 800 }, visited: [{ url: `${T}/items`, width: 1280 }, { url: `${T}/__nuxt_dev__/error-overlay/abc`, width: 1280 }] }],
+  }], T);
+  assert.deepEqual(c.neverFaulted, ['GET /api/items']);
+  assert.deepEqual(c.neverNarrow, ['/items']);
+});
+
+test('what a probe saw while it signed in is left out of coverage, and the page it landed on stays', () => {
+  // It opened /login, posted the form (the login page also asked who is
+  // signed in), landed on / and saved the session there, then went on.
+  const signin = {
+    probe: 'signin',
+    requests: [
+      { method: 'GET', url: `${T}/api/auth/me`, via: 'page' }, { method: 'POST', url: `${T}/api/auth/login`, via: 'page' },
+      { method: 'GET', url: `${T}/api/dashboard`, via: 'page' }, { method: 'GET', url: `${T}/api/tasks`, via: 'page' },
+    ],
+    faults: [],
+    pages: [{ id: 1, viewport: { width: 1280, height: 800 }, visited: [{ url: `${T}/login`, width: 1280 }, { url: `${T}/`, width: 1280 }, { url: `${T}/tasks`, width: 1280 }] }],
+    signInFlow: { requests: 2, pages: [`${T}/login`] },
+  };
+  const c = coverage([signin], T);
+  assert.deepEqual(c.neverFaulted, ['GET /api/dashboard', 'GET /api/tasks']);
+  assert.deepEqual(c.neverNarrow, ['/', '/tasks']);
+  // What another probe saw counts, the sign-in page and its requests included.
+  const login = {
+    probe: 'login-errors',
+    requests: [{ method: 'POST', url: `${T}/api/auth/login`, via: 'page' }],
+    faults: [{ method: 'GET', url: `${T}/api/dashboard`, fault: '500' }],
+    pages: [{ id: 1, viewport: { width: 375, height: 800 }, visited: [{ url: `${T}/login`, width: 375 }] }],
+  };
+  const both = coverage([signin, login], T);
+  assert.deepEqual(both.endpoints, [{ endpoint: 'GET /api/dashboard', faults: ['500'] }, { endpoint: 'GET /api/tasks', faults: [] }, { endpoint: 'POST /api/auth/login', faults: [] }]);
+  assert.deepEqual(both.pages, [{ page: '/', widths: [1280] }, { page: '/login', widths: [375] }, { page: '/tasks', widths: [1280] }]);
+  // A result with no sign-in in it counts whole.
+  const { signInFlow, ...plain } = signin;
+  assert.ok(signInFlow);
+  assert.deepEqual(coverage([plain], T).neverFaulted, ['GET /api/auth/me', 'GET /api/dashboard', 'GET /api/tasks', 'POST /api/auth/login']);
 });

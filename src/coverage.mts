@@ -12,7 +12,11 @@ const ID_SEGMENT = [
   /^(?=.*\d)(?=.*[a-z])[A-Za-z0-9_-]{20,}$/,
 ];
 const ASSET = /\.(m?js|css|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|otf|eot|wasm|txt)$/i;
-const DEV_PREFIX = /^\/(_nuxt|@vite|@fs|@id|__vite|node_modules|_next\/static|__nuxt_devtools__)(\/|$)/;
+// The dev server's own requests (bundles, error overlays, devtools, hot reload
+// and its sockets, the icon): no person's action makes them, and faulting
+// them tests the dev server, not the app. Framework paths that carry the
+// app's data, such as /_next/data/, /_next/image and /__nuxt_island/, count.
+const DEV_PATH = /^\/(?:_nuxt\/|__nuxt_dev__\/|__nuxt_devtools__\/|_next\/static\/|_next\/webpack-hmr|__nextjs|__vite|@vite\/|@fs\/|@id\/|__webpack|sockjs-node|favicon\.ico|node_modules\/)/;
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
@@ -48,7 +52,7 @@ export function foldPath(pathname: string): string {
 export function endpointOf(method: string, url: string, target: string): string | null {
   const u = parse(url, target);
   if (!u || !/^https?:$/.test(u.protocol)) return null;
-  if (ASSET.test(u.pathname) || DEV_PREFIX.test(u.pathname)) return null;
+  if (ASSET.test(u.pathname) || DEV_PATH.test(u.pathname)) return null;
   const t = parse(target, target);
   const origin = t && u.host === t.host ? '' : u.host;
   return `${method.toUpperCase()} ${origin}${foldPath(u.pathname)}`;
@@ -57,7 +61,7 @@ export function endpointOf(method: string, url: string, target: string): string 
 export function pageOf(url: string, target: string): string | null {
   const u = parse(url, target);
   const t = parse(target, target);
-  if (!u || !t || !/^https?:$/.test(u.protocol) || u.host !== t.host) return null;
+  if (!u || !t || !/^https?:$/.test(u.protocol) || u.host !== t.host || DEV_PATH.test(u.pathname)) return null;
   return foldPath(u.pathname);
 }
 
@@ -69,16 +73,21 @@ export interface Coverage {
   viewports: string[];
 }
 
+// Signing in is how a hunt gets started, not what it tests: what a probe saw
+// while it signed in (the sign-in page and the requests made before the page
+// it landed on) is left out, unless another probe saw it too. The page it
+// landed on, and everything after, counts.
 export function coverage(results: ProbeResult[], target: string): Coverage {
   const endpoints = new Map<string, Set<string>>();
   const pages = new Map<string, Set<number>>();
   const viewports = new Set<string>();
   for (const r of results) {
-    for (const req of r.requests ?? []) {
-      if (req.via !== 'page' || !reachesApp(req.url, target)) continue;
+    const flow = r.signInFlow;
+    (r.requests ?? []).forEach((req, i) => {
+      if ((flow && i < flow.requests) || req.via !== 'page' || !reachesApp(req.url, target)) return;
       const e = endpointOf(req.method, req.url, target);
       if (e && !endpoints.has(e)) endpoints.set(e, new Set());
-    }
+    });
     for (const f of r.faults ?? []) {
       if (!reachesApp(f.url, target)) continue;
       const e = endpointOf(f.method, f.url, target);
@@ -90,7 +99,7 @@ export function coverage(results: ProbeResult[], target: string): Coverage {
     for (const p of r.pages ?? []) {
       if (p.viewport && (p.visited ?? []).length) viewports.add(`${p.viewport.width}x${p.viewport.height}`);
       for (const v of p.visited ?? []) {
-        const page = pageOf(v.url, target);
+        const page = flow?.pages.includes(v.url) ? null : pageOf(v.url, target);
         if (!page) continue;
         const set = pages.get(page) ?? new Set<number>();
         if (typeof v.width === 'number') set.add(v.width);

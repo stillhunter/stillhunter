@@ -42,7 +42,7 @@ describe('the wall limit', { skip: noBrowser, timeout: 400_000 }, () => {
     const app = await startFixture();
     const dir = makeRepo(app);
     try {
-      const runId = runIdOf(hunt(['start', '--minutes', '1'], { cwd: dir }).stdout);
+      const runId = runIdOf(hunt(['start', '--minutes', '3'], { cwd: dir }).stdout);
       assert.ok(runId);
       const runDir = path.join(dir, '.stillhunter', 'runs', runId);
       assert.equal(probe(dir, runId, 'signin', SIGNIN_PROBE).result?.checks?.[0]?.pass, true);

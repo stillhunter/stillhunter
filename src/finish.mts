@@ -1,15 +1,15 @@
 // finish: checks the hunter's claims, makes it account for every failed check
 // and for what it never covered, re-runs each claimed probe twice from scratch
 // and reports what reproduced.
-import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { claimProblems, type Dismissal, type Finding, type FinishInput, parseFinishInput, unaccounted, type Unaccounted } from './accounting.mjs';
-import { atOrAbove, block, type Config, type Context, flag, FOLDER, loadRun, minutesAndSeconds, readConfig, readStdin, remaining, type Severity, severityOf } from './common.mjs';
+import { atOrAbove, block, brief, type Config, type Context, flag, FOLDER, loadRun, minutesAndSeconds, readConfig, readStdin, remaining, type Severity, severityOf } from './common.mjs';
 import { coverage, coverageLines } from './coverage.mjs';
 import { hiddenLine } from './flags.mjs';
-import { KILL_GRACE_MS, PROBE_TIMEOUT_MS, runProbe } from './probe-host.mjs';
-import { allResults, latestResults, outcome, type ProbeResult, probesDir, signInProbe } from './results.mjs';
+import { KILL_GRACE_MS, PROBE_TIMEOUT_MS, runProbe, sessionPath } from './probe-host.mjs';
+import { RESET_TIMEOUT_MS, resetAndSignIn, signedOut } from './reset.mjs';
+import { allResults, type Before, latestResults, outcome, type ProbeResult, probesDir, signInProbe } from './results.mjs';
 import { answers } from './target.mjs';
 
 export const COVERAGE_REFUSAL_SECONDS = 180;
@@ -23,7 +23,8 @@ export const FINISH_WALL_SECONDS = 540;
 // seconds. The hunter's shell runs only the runner and sets no variable.
 export const WALL_ENV = 'STILLHUNTER_FINISH_WALL_SECONDS';
 export const NOT_RERUN = 'Not re-run in time, not counted';
-const RESET_TIMEOUT_MS = 120_000;
+export const NOT_RERUNNABLE = 'Could not re-run, not counted';
+const INTERMITTENT = 'Intermittent (1 of 2), not counted';
 const RUN_MARGIN_MS = 10_000;
 const MIN_RUN_MS = 15_000;
 
@@ -43,16 +44,6 @@ function readState(dir: string): FinishState {
 function refuse(ctx: Context, lines: string[]): never {
   process.stdout.write(block([`stillhunter | finish refused | run ${ctx.runId}`, ...lines]));
   process.exit(2);
-}
-
-// Runs the configured reset in the repository root. Its failure does not stop
-// the proof; it is noted in the report.
-export function resetApp(root: string, config: Config, timeoutMs = RESET_TIMEOUT_MS): string | null {
-  if (!config.reset) return null;
-  const r = spawnSync(config.reset, { cwd: root, shell: true, encoding: 'utf8', timeout: timeoutMs });
-  if (r.status === 0) return null;
-  const why = r.error ? r.error.message : `exit ${r.status ?? r.signal}`;
-  return `reset ("${config.reset}") failed: ${why}${r.stderr ? `: ${r.stderr.trim().slice(-300)}` : ''}`;
 }
 
 // How long one proof run may be given so that, with the browser's start, the
@@ -90,6 +81,8 @@ interface Prover {
   root: string;
   ctx: Context;
   config: Config;
+  // The hunt's latest result of each probe, and the run's sign-in probe.
+  latest: Map<string, ProbeResult>;
   signIn: string | null;
   notes: string[];
   wallDeadline: number;
@@ -99,30 +92,35 @@ interface Prover {
 // it (or cut it short), so the probe counts as not re-run in time.
 async function proofRun(p: Prover, probe: string, label: string): Promise<ProbeResult | null> {
   const proofDir = path.join(p.dir, 'proof');
-  const host = (name: string, file: string, timeoutMs: number) => runProbe({
+  const host = (name: string, timeoutMs: number) => runProbe({
     runDir: p.dir, probe: name, probeFile: path.join(probesDir(p.dir), `${name}.mjs`), target: p.ctx.target, browser: p.ctx.browser,
     signInVariables: p.ctx.signInVariables, shotsDir: path.join(proofDir, 'shots'), timeoutMs,
-  }).then((r) => { writeFileSync(path.join(proofDir, file), JSON.stringify(r, null, 2) + '\n'); return r; });
-  // App data and, with it, any session go back to the start; the sign-in probe
-  // then signs in again so the claimed probe starts as it did in the hunt.
+  });
+  const save = (r: ProbeResult, file: string) => { writeFileSync(path.join(proofDir, file), JSON.stringify(r, null, 2) + '\n'); return r; };
+  // App data and, with it, any session go back to the start, and the probe
+  // that signed in before the claimed probe's hunt run signs in again (none,
+  // if none did then), so the claimed probe starts as its hunt run did. A
+  // hunt run with no record of that falls back to the run's sign-in probe.
+  let before: Before | null = null;
   if (p.config.reset) {
     const resetMs = Math.min(RESET_TIMEOUT_MS, p.wallDeadline - Date.now() - KILL_GRACE_MS - RUN_MARGIN_MS - MIN_RUN_MS);
     if (resetMs <= 0) return null;
-    const failed = resetApp(p.root, p.config, resetMs);
-    if (failed) p.notes.push(`before ${probe} ${label}: ${failed}`);
-    if (p.signIn && p.signIn !== probe) {
-      const t = runTimeout(Date.now(), p.wallDeadline);
-      if (t === null) return null;
-      const s = await host(p.signIn, `${probe}.${label}.signin.result.json`, t);
-      // Cut short by the deadline, it says nothing, and the claimed probe
-      // would run signed out.
-      if (s.hostError === 'timeout' && t < PROBE_TIMEOUT_MS) return null;
-      if (s.error || !s.savedSession) p.notes.push(`before ${probe} ${label}: signing in again with "${p.signIn}" failed: ${s.error ?? 'no session saved'}`);
-    }
+    const huntStart = p.latest.get(probe)?.before;
+    before = await resetAndSignIn({
+      root: p.root, config: p.config, probe, signIn: huntStart ? (huntStart.signIn?.probe ?? null) : p.signIn, sessionFile: sessionPath(p.dir), resetTimeoutMs: resetMs,
+      signInTimeoutMs: () => runTimeout(Date.now(), p.wallDeadline),
+      runSignIn: async (name, t) => save(await host(name, t), `${probe}.${label}.signin.result.json`),
+    });
+    if (!before) return null;
+    const s = before.signIn;
+    if (before.resetError) p.notes.push(`before ${probe} ${label}: ${before.resetError}`);
+    if (s?.error) p.notes.push(`before ${probe} ${label}: ${s.savedSession ? `the sign-in probe "${s.probe}" saved a session, then failed` : `signing in again with "${s.probe}" failed`}: ${s.error}`);
   }
   const t = runTimeout(Date.now(), p.wallDeadline);
   if (t === null) return null;
-  const r = await host(probe, `${probe}.${label}.result.json`, t);
+  const r = await host(probe, t);
+  if (before) r.before = before;
+  save(r, `${probe}.${label}.result.json`);
   // A run the deadline shortened and that then timed out says nothing about the bug.
   if (r.hostError === 'timeout' && t < PROBE_TIMEOUT_MS) return null;
   return r;
@@ -147,14 +145,55 @@ async function prove(p: Prover, probe: string): Promise<ProbeResult[] | null> {
   return runs;
 }
 
-function judge(f: Finding, runs: ProbeResult[]): { kind: 'confirmed'; f: Confirmed } | { kind: 'intermittent' | 'dropped'; f: Unconfirmed } {
+type Judged = { kind: 'confirmed'; f: Confirmed } | { kind: 'intermittent' | 'dropped' | 'notRerunnable'; f: Unconfirmed };
+type Read = { state: 'failed'; detail: string } | { state: 'held' } | { state: 'none'; why: string };
+
+// Confirmed when the check failed in both re-runs, intermittent when in one.
+// Otherwise it did not reproduce only if the check ran and held both times. A
+// re-run says nothing about the bug when it never got to the check (the probe
+// threw or timed out first, or the check is not in its result), or when it
+// did not start as the hunt run did (its reset or its sign-in failed, and the
+// hunt run's had not): then the claim could not be re-run.
+export function judge(f: Finding, runs: ProbeResult[], hunt?: ProbeResult): Judged {
   const severity = severityOf(f.severity);
-  const outcomes = runs.map((r) => outcome(r, f.check));
-  const failed = outcomes.flatMap((o) => (o.state === 'failed' ? [o.detail] : []));
+  const reads = runs.map((r, i) => readRun(r, i + 1, f.check, hunt));
+  const failed = reads.flatMap((o) => (o.state === 'failed' ? [o.detail] : []));
   if (failed.length === runs.length) return { kind: 'confirmed', f: { ...f, severity, runs: failed } };
-  if (failed.length > 0) return { kind: 'intermittent', f: { ...f, severity, why: `failed in ${failed.length} of ${runs.length} re-runs` } };
-  const why = outcomes.map((o, i) => (o.state === 'held' ? `held on re-run ${i + 1}` : `not reached on re-run ${i + 1}${runs[i]?.error ? `: ${runs[i]!.error}` : ''}`)).join('; ');
-  return { kind: 'dropped', f: { ...f, severity, why } };
+  const why = reads.map((o, i) => (o.state === 'none' ? o.why : `${o.state} on re-run ${i + 1}`)).join('; ');
+  const kind = failed.length ? 'intermittent' : reads.every((o) => o.state === 'held') ? 'dropped' : 'notRerunnable';
+  return { kind, f: { ...f, severity, why } };
+}
+
+function readRun(r: ProbeResult, k: number, check: string, hunt: ProbeResult | undefined): Read {
+  if (r.before?.resetError && !hunt?.before?.resetError) return { state: 'none', why: `re-run ${k} does not count: the reset before it failed, as it had not before the hunt run` };
+  if (signedOut(r.before) && !signedOut(hunt?.before)) return { state: 'none', why: `re-run ${k} does not count: it ran signed out, as the sign-in after the reset failed, which it had not before the hunt run` };
+  const o = outcome(r, check);
+  return o.state === 'missing' ? { state: 'none', why: notReached(r, k) } : o;
+}
+
+function notReached(r: ProbeResult, k: number): string {
+  const setup = [
+    ...(r.before?.resetError ? ['the reset before it failed'] : []),
+    ...(signedOut(r.before) ? ['it ran signed out: the sign-in after the reset failed'] : []),
+  ];
+  return `re-run ${k} never reached the check${setup.length ? ` (${setup.join('; ')})` : ''}: ${r.error ? brief(r.error) : 'the check is not in its result'}`;
+}
+
+// Said first among the claims that could not be re-run: when the sign-in
+// after a reset failed with no session saved, the re-runs it came before ran
+// signed out. Only the re-runs of the probes behind the listed claims count,
+// so a list cut by severity, or a claim found signed out and re-run so, says
+// nothing about it.
+export function signInLine(byProbe: Map<string, ProbeResult[]>, probes: Iterable<string> = byProbe.keys()): string | null {
+  const runs = [...new Set(probes)].flatMap((p) => byProbe.get(p) ?? []).filter((r) => r.before);
+  const failed = runs.flatMap((r) => (signedOut(r.before) ? [r.before!.signIn!] : []));
+  const first = failed[0];
+  if (first) {
+    return failed.length === runs.length
+      ? `After reset, the sign-in probe "${first.probe}" failed: ${brief(first.error!)}. Each claimed probe then ran signed out.`
+      : `After reset, the sign-in probe "${first.probe}" failed before ${failed.length} of ${runs.length} re-runs: ${brief(first.error!)}. Those re-runs ran signed out.`;
+  }
+  return null;
 }
 
 const ORDER: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
@@ -182,6 +221,7 @@ export async function finish(args: string[]): Promise<void> {
 
   const state = readState(dir);
   const missing = unaccounted(input, latest);
+  const signIn = signInProbe(dir);
   const cov = coverage(allResults(dir), ctx.target);
   const left = remaining(ctx);
   const refusal: string[] = [];
@@ -210,7 +250,7 @@ export async function finish(args: string[]): Promise<void> {
   const config = readConfig(root);
   mkdirSync(path.join(dir, 'proof'), { recursive: true });
   const proofDeadline = startedAt + budget * 1000;
-  const prover: Prover = { dir, root, ctx, config, signIn: signInProbe(dir), notes: [], wallDeadline: startedAt + wallSeconds() * 1000 };
+  const prover: Prover = { dir, root, ctx, config, latest, signIn, notes: [], wallDeadline: startedAt + wallSeconds() * 1000 };
   const order = proofOrder(input.findings);
   const byProbe = new Map<string, ProbeResult[]>();
   const settle = (complete: boolean) => writeReport({ ctx, dir, input, missing, cov, latest, byProbe, notes: prover.notes, startedAt, budget, wall: wallSeconds(), order, complete });
@@ -254,30 +294,34 @@ function writeReport(r: ReportInput): string[] {
   const confirmed: Confirmed[] = [];
   const intermittent: Unconfirmed[] = [];
   const dropped: Unconfirmed[] = [];
+  const notRerunnable: Unconfirmed[] = [];
   const notRerun: Unconfirmed[] = [];
   for (const f of input.findings) {
     const runs = r.byProbe.get(f.probe);
     if (!runs) { notRerun.push({ ...f, severity: severityOf(f.severity), why: 'no time to re-run it before the proof budget or the wall limit ran out' }); continue; }
-    const j = judge(f, runs);
+    const j = judge(f, runs, r.latest.get(f.probe));
     if (j.kind === 'confirmed') confirmed.push(j.f);
     else if (j.kind === 'intermittent') intermittent.push(j.f);
+    else if (j.kind === 'notRerunnable') notRerunnable.push(j.f);
     else dropped.push(j.f);
   }
   const bySeverity = (a: { severity: Severity }, b: { severity: Severity }) => ORDER[a.severity] - ORDER[b.severity];
   confirmed.sort(bySeverity);
+  notRerunnable.sort(bySeverity);
   notRerun.sort(bySeverity);
   const shown = confirmed.filter((f) => atOrAbove(f.severity, ctx.minSeverity));
   const shownIntermittent = intermittent.filter((f) => atOrAbove(f.severity, ctx.minSeverity));
+  const shownNotRerunnable = notRerunnable.filter((f) => atOrAbove(f.severity, ctx.minSeverity));
   const shownNotRerun = notRerun.filter((f) => atOrAbove(f.severity, ctx.minSeverity));
   const erred = [...r.latest].filter(([, x]) => x.error).map(([name, x]) => `${name}: ${x.error}`);
   const finishSeconds = Math.round((Date.now() - r.startedAt) / 1000);
   const proof = { budgetSeconds: r.budget, wallLimitSeconds: r.wall, finishSeconds, complete: r.complete, order: r.order, proved: [...r.byProbe.keys()] };
-  writeWhole(path.join(dir, 'findings.json'), JSON.stringify({ confirmed, intermittent, dropped, notRerun, dismissed: input.dismissed, unaccounted: missing, coverage: cov, notes: r.notes, proof }, null, 2) + '\n');
+  writeWhole(path.join(dir, 'findings.json'), JSON.stringify({ confirmed, intermittent, dropped, notRerunnable, notRerun, dismissed: input.dismissed, unaccounted: missing, coverage: cov, notes: r.notes, proof }, null, 2) + '\n');
 
   const reportPath = `${FOLDER}/runs/${ctx.runId}/report.txt`;
   const elapsed = Math.round((Date.now() - ctx.startedAt) / 1000);
   const header = [
-    `stillhunter | ${minutesAndSeconds(elapsed)} | run ${ctx.runId} | ${confirmed.length} confirmed, ${intermittent.length} intermittent, ${dropped.length} did not reproduce${notRerun.length ? `, ${notRerun.length} not re-run in time` : ''}`,
+    `stillhunter | ${minutesAndSeconds(elapsed)} | run ${ctx.runId} | ${confirmed.length} confirmed, ${intermittent.length} intermittent, ${dropped.length} did not reproduce${notRerunnable.length ? `, ${notRerunnable.length} could not re-run` : ''}${notRerun.length ? `, ${notRerun.length} not re-run in time` : ''}`,
     `target: ${ctx.target} | asked: ${ctx.focus ?? 'the change'}${ctx.minSeverity === 'low' ? '' : ` | showing ${ctx.minSeverity} severity and above`}`,
   ];
   const findingLines = (list: Confirmed[]) => list.flatMap((f, i) => [
@@ -287,26 +331,38 @@ function writeReport(r: ReportInput): string[] {
     `   saw: ${f.runs[0] ?? f.actual ?? ''}`,
     `   repro: ${FOLDER}/runs/${ctx.runId}/probes/${f.probe}.mjs (expectation "${f.check}")`,
   ]);
-  const listBlock = (title: string, list: Unconfirmed[]) => (list.length
-    ? ['', `${title}:`, ...list.map((f) => `- ${f.title} (probe ${f.probe}, expectation "${f.check}")`)]
+  const listBlock = (title: string, list: Unconfirmed[], why = false) => (list.length
+    ? ['', `${title}:`, ...list.map((f) => `- ${f.title} (probe ${f.probe}, expectation "${f.check}")${why ? `: ${f.why}` : ''}`)]
     : []);
+  // The sign-in's failure comes first, as it is the likely reason for the rest.
+  const rerunBlock = (list: Unconfirmed[]) => {
+    if (!list.length) return [];
+    const signInTrouble = signInLine(r.byProbe, list.map((f) => f.probe));
+    return [
+      '', `${NOT_RERUNNABLE}:`,
+      ...(signInTrouble ? [signInTrouble] : []),
+      ...list.map((f) => `- ${f.title} (probe ${f.probe}, expectation "${f.check}"): ${f.why}`),
+    ];
+  };
   const coverageSection = ['', 'Coverage', ...coverageLines(cov)];
   // Findings below the floor, of every kind, are hidden from the printed
   // report; report.txt lists all of them.
-  const hidden = hiddenLine((confirmed.length - shown.length) + (intermittent.length - shownIntermittent.length) + (notRerun.length - shownNotRerun.length), ctx.minSeverity, reportPath);
+  const hidden = hiddenLine((confirmed.length - shown.length) + (intermittent.length - shownIntermittent.length) + (notRerunnable.length - shownNotRerunnable.length) + (notRerun.length - shownNotRerun.length), ctx.minSeverity, reportPath);
 
   const printed = [
     ...header,
     ...(shown.length ? ['', 'Findings (each reproduced twice from scratch)', ...findingLines(shown)] : ['', confirmed.length ? 'No finding at this severity reproduced.' : 'No finding reproduced.']),
     ...(hidden ? [hidden] : []),
-    ...listBlock('Intermittent (1 of 2), not counted', shownIntermittent),
+    ...listBlock(INTERMITTENT, shownIntermittent, true),
+    ...rerunBlock(shownNotRerunnable),
     ...listBlock(NOT_RERUN, shownNotRerun),
     ...coverageSection,
   ];
   const full = [
     ...header,
     ...(confirmed.length ? ['', 'Findings (each reproduced twice from scratch)', ...findingLines(confirmed)] : ['', 'No finding reproduced.']),
-    ...listBlock('Intermittent (1 of 2), not counted', intermittent),
+    ...listBlock(INTERMITTENT, intermittent, true),
+    ...rerunBlock(notRerunnable),
     ...listBlock(NOT_RERUN, notRerun),
     ...(dropped.length ? ['', 'Did not reproduce:', ...dropped.map((f) => `- ${f.title}: ${f.why}`)] : []),
     ...(input.dismissed.length ? ['', 'Dismissed:', ...input.dismissed.map(dismissalLine)] : []),

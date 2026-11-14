@@ -274,14 +274,19 @@ describe('containment', { skip: noBrowser, timeout: 300_000 }, () => {
   });
 
   test('a probe sees only PATH and the sign-in variables start named', () => {
-    // macOS itself adds __CF_USER_TEXT_ENCODING to every process it starts.
+    // macOS itself adds __CF_USER_TEXT_ENCODING to every process it starts, and
+    // Node on Linux sets UV_USE_IO_URING=0 in its own environment at startup
+    // (it does so even under `env -i`), so neither comes from the runner. On
+    // Windows, libuv copies the variables Windows needs to start a process into
+    // every child it spawns, from the parent's environment, when they are missing.
     const result = run('env', `
+      const WINDOWS = ['HOMEDRIVE', 'HOMEPATH', 'LOGONSERVER', 'SYSTEMDRIVE', 'TEMP', 'USERDOMAIN', 'USERPROFILE', 'WINDIR'];
       const keys = Object.keys(process.env).map((k) => k.toUpperCase());
       rr.note('keys', keys);
       rr.expect('no-decoy', !keys.includes('SHFIX_SECRET_TOKEN'));
       rr.expect('no-home', !keys.includes('HOME'));
       rr.expect('sign-in-present', typeof process.env.SHFIX_PASSWORD === 'string');
-      rr.expect('only-allowed', keys.every((k) => k === 'PATH' || k === 'SYSTEMROOT' || k === '__CF_USER_TEXT_ENCODING' || /(EMAIL|USER(NAME)?|LOGIN|PASSWORD|PASS)$/.test(k)), keys);
+      rr.expect('only-allowed', keys.every((k) => k === 'PATH' || k === 'SYSTEMROOT' || (process.platform === 'win32' && WINDOWS.includes(k)) || k === '__CF_USER_TEXT_ENCODING' || (k === 'UV_USE_IO_URING' && process.env[k] === '0') || /(EMAIL|USER(NAME)?|LOGIN|PASSWORD|PASS)$/.test(k)), keys);
     `);
     passed(result);
     assert.doesNotMatch(JSON.stringify(result), new RegExp(DECOY.SHFIX_SECRET_TOKEN));

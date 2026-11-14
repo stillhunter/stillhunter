@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { credentialIn } from '../dist/keep.mjs';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { childEnv, NODE_NET_PERMISSION, permissionArgs, redact, REDACTED, sessionValues } from '../dist/probe-host.mjs';
+import { childEnv, LINUX_PLATFORM_FILES, NODE_NET_PERMISSION, permissionArgs, redact, REDACTED, sessionValues } from '../dist/probe-host.mjs';
 
 test('the child gets PATH and the named sign-in variables, nothing else', () => {
   const env = { PATH: '/bin', HOME: '/home/me', APP_EMAIL: 'a@b.c', APP_PASSWORD: 'pw', AWS_SECRET_ACCESS_KEY: 'k', OTHER_EMAIL: 'x' };
@@ -25,6 +25,15 @@ test('the permission flags allow reading the run folder, and writing only the sc
   assert.ok(!args.includes(`--allow-fs-write=${runDir}`));
   for (const a of ['--allow-child-process', '--allow-worker', '--allow-addons', '--allow-wasi']) assert.ok(!args.includes(a), a);
   assert.equal(args.includes('--allow-net'), NODE_NET_PERMISSION);
+});
+
+test('on Linux the child may read the few system files playwright-core checks for WSL and containers, and nothing else of the system', () => {
+  const runDir = path.resolve('/nonexistent/repo/.stillhunter/runs/r');
+  const system = (platform) => permissionArgs(runDir, [], platform).filter((a) => /^--allow-fs-read=\/(proc|run|\.dockerenv)/.test(a)).map((a) => a.slice('--allow-fs-read='.length)).sort();
+  assert.deepEqual(system('linux'), [...LINUX_PLATFORM_FILES].sort());
+  for (const f of LINUX_PLATFORM_FILES) assert.ok(!/[*]/.test(f) && f.split('/').length > 2 || f === '/.dockerenv', f);
+  assert.deepEqual(system('darwin'), []);
+  assert.deepEqual(system('win32'), []);
 });
 
 test('a kept test holding a sign-in value is caught', () => {

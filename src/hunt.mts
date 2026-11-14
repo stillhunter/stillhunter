@@ -15,12 +15,13 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { chooseBrowser, installedOnThisMachine } from './browser.mjs';
 import { baseRef, changeList, changeText, collectChange, ensureRunsIgnored, fileDiff, readSpecs } from './change.mjs';
-import { block, type Context, fail, FOLDER, flag, loadRun, PROBE_NAME, readConfig, readStdin, remaining, repoRoot, runsDir, signInVariableNames, stamp, findTargetUrl } from './common.mjs';
+import { block, brief, type Context, fail, FOLDER, flag, loadRun, PROBE_NAME, readConfig, readStdin, remaining, repoRoot, runsDir, signInVariableNames, stamp, findTargetUrl } from './common.mjs';
 import { finish } from './finish.mjs';
 import { parseStartFlags } from './flags.mjs';
 import { keep, replay } from './keep.mjs';
-import { runProbe } from './probe-host.mjs';
-import { latestFile, nextRunNumber, numberedFile, probesDir } from './results.mjs';
+import { runProbe, sessionPath } from './probe-host.mjs';
+import { resetAndSignIn, resetApp, seconds } from './reset.mjs';
+import { type Before, latestFile, nextRunNumber, numberedFile, probesDir, signInProbe } from './results.mjs';
 import { answers } from './target.mjs';
 
 const NO_CHANGE = 'No change found. Name a feature to hunt, for example: /stillhunter:hunt the checkout flow';
@@ -40,6 +41,14 @@ async function start(args: string[]): Promise<void> {
   const choice = chooseBrowser(config.browser ?? null, installedOnThisMachine());
   if (!choice.ok) fail(choice.message);
 
+  // Every probe and every proof re-run starts from the reset, so a reset that
+  // does not work must stop the hunt here, not surface at finish. Its time
+  // counts against the budget like any other.
+  const now = Date.now();
+  const resetError = await resetApp(root, config);
+  if (resetError) fail(`The app's reset failed, so the hunt did not start: ${resetError}\nFix the reset ("reset" in ${FOLDER}/config.json, run in the repository root), then start again.`);
+  const resetSeconds = seconds(Date.now() - now);
+
   const runId = `${stamp()}-hunt-${randomBytes(3).toString('hex').slice(0, 4)}`;
   const dir = path.join(runsDir(root), runId);
   mkdirSync(probesDir(dir), { recursive: true });
@@ -47,7 +56,6 @@ async function start(args: string[]): Promise<void> {
 
   const mode = change.empty ? 'feature' : 'change';
   const signInVariables = signInVariableNames();
-  const now = Date.now();
   const ctx: Context = {
     runId, root, target, browser: choice.name, base, startedAt: now, deadline: now + minutes * 60_000,
     depth, budgetMinutes: minutes, minSeverity, focus, mode, signInVariables,
@@ -63,6 +71,7 @@ async function start(args: string[]): Promise<void> {
       ? `mode: feature. There is no change against the base, so this hunt tests "${focus}" as it stands.`
       : `mode: change. diff base: ${base.slice(0, 12)} (one file's whole diff: diff --file <file>)`,
     `sign-in variables set in the environment (names only): ${signInVariables.length ? signInVariables.join(', ') : 'none'}`,
+    ...(config.reset ? [`reset: app data is reset before every probe and every re-run, back to what the app holds now, and the sign-in probe then signs in again; the reset took ${resetSeconds} s`] : []),
     'changed files:',
     ...(change.files.length ? change.files.map((l) => `  ${l}`) : ['  none']),
     `specs: ${specs.length ? specs.map((s) => s.file).join(', ') : 'none'}`,
@@ -74,8 +83,21 @@ async function start(args: string[]): Promise<void> {
   process.stdout.write(block(lines));
 }
 
+// Plain words for what went wrong before the probe ran, said first in what
+// the probe prints: without them a probe that ran signed out, or on data the
+// reset did not put back, looks like the app's fault.
+function beforeProblems(before: Before | null): string[] {
+  if (!before) return [];
+  const s = before.signIn;
+  return [
+    ...(before.resetError ? [`Before this probe, the ${before.resetError}. App data may not be in its reset state.`] : []),
+    ...(s?.error && s.savedSession ? [`After the reset, the sign-in probe "${s.probe}" saved a session, then failed: ${brief(s.error)}. This probe ran with that session. Keep the sign-in probe to signing in: it runs before every probe.`] : []),
+    ...(s?.error && !s.savedSession ? [`After the reset, the sign-in probe "${s.probe}" failed: ${brief(s.error)}. This probe ran signed out.`] : []),
+  ];
+}
+
 async function probe(args: string[]): Promise<void> {
-  const { ctx, dir } = loadRun(args);
+  const { ctx, dir, root } = loadRun(args);
   const name = flag(args, '--name');
   if (!name || !PROBE_NAME.test(name)) fail('Give the probe a --name of lowercase letters, digits and dashes.');
   if (remaining(ctx) === 0) {
@@ -87,15 +109,38 @@ async function probe(args: string[]): Promise<void> {
   const probeFile = path.join(probesDir(dir), `${name}.mjs`);
   writeFileSync(probeFile, script);
   const n = nextRunNumber(dir, name);
-  const result = await runProbe({ runDir: dir, probe: name, probeFile, target: ctx.target, browser: ctx.browser, signInVariables: ctx.signInVariables, shotsDir: path.join(dir, 'shots') });
+  const run = (probeName: string, timeoutMs?: number) => runProbe({
+    runDir: dir, probe: probeName, probeFile: path.join(probesDir(dir), `${probeName}.mjs`), target: ctx.target, browser: ctx.browser,
+    signInVariables: ctx.signInVariables, shotsDir: path.join(dir, 'shots'), timeoutMs,
+  });
+  // The same start the proof gives each re-run: app data reset, then signed
+  // in again by the run's sign-in probe, so what a probe finds is what finish
+  // can prove. The probe runs whatever went wrong, and says so.
+  const config = readConfig(root);
+  const signIn = signInProbe(dir);
+  const before = config.reset
+    ? await resetAndSignIn({
+      root, config, probe: name, signIn, sessionFile: sessionPath(dir),
+      runSignIn: async (s, timeoutMs) => {
+        const r = await run(s, timeoutMs);
+        writeFileSync(path.join(probesDir(dir), `${name}.${n}.signin.result.json`), JSON.stringify(r, null, 2) + '\n');
+        return r;
+      },
+    })
+    : null;
+  const problems = beforeProblems(before);
+  const result = await run(name);
   result.run = n;
+  if (before) result.before = before;
   const json = JSON.stringify(result, null, 2) + '\n';
   writeFileSync(numberedFile(dir, name, n), json);
   writeFileSync(latestFile(dir, name), json);
   const shown = {
+    ...(problems.length ? { warning: problems.join(' ') } : {}),
     probe: name,
     run: n,
     remainingSeconds: remaining(ctx),
+    ...(before ? { before } : {}),
     resultFile: numberedFile(dir, name, n),
     checks: result.checks,
     notes: result.notes,

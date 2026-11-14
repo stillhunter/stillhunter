@@ -30,6 +30,7 @@ const FLAKY = `export default async function (rr) {
 `;
 const MISC = `export default async function (rr) {
   await rr.goto('/');
+  await rr.page.evaluate(() => fetch('/api/echo', { method: 'POST', body: '{}' }));
   rr.expect('misc-a', false, 'a selector that matched nothing');
   rr.expect('misc-b', false, 'left unexplained');
   const echo = await rr.request('POST', '/api/echo', '{"n": 1e309}\u0000', { raw: true, headers: { 'x-test': 'yes' } });
@@ -51,6 +52,17 @@ const LITERAL = `export default async function (rr) {
   rr.expect('literal-check', typed.length === 0, 'fails every time');
 }
 `;
+// Its check fails in the hunt; every re-run throws before it gets there.
+const GONE = `import fs from 'node:fs';
+export default async function (rr) {
+  const n = fs.existsSync('gone-count') ? Number(fs.readFileSync('gone-count', 'utf8')) + 1 : 1;
+  fs.writeFileSync('gone-count', String(n));
+  if (n > 1) throw new Error('the list was not there to check');
+  await rr.goto('/');
+  rr.expect('list-has-three-items', false, 'two items listed');
+  rr.expect('count-says-three', false, 'the count says 2');
+}
+`;
 // Its host crashes on the first proof re-run only, so the runner must retry it.
 const CRASHY = `import fs from 'node:fs';
 export default async function (rr) {
@@ -62,7 +74,9 @@ export default async function (rr) {
 }
 `;
 
-describe('a hunt against the fixture app', { skip: noBrowser, timeout: 600_000 }, () => {
+// Every probe resets and signs in first, so the suite has room for twice the
+// browser work it had before resets.
+describe('a hunt against the fixture app', { skip: noBrowser, timeout: 900_000 }, () => {
   let app;
   let dir;
   let runId;
@@ -84,14 +98,20 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 600_000 }
     { title: 'The coin answer is wrong', severity: 'medium', probe: 'flaky', check: 'coin-ok', where: 'GET /api/coin' },
     { title: 'The count does not match the list', severity: 'medium', probe: 'crashy', check: 'count-matches-list', where: '/' },
     { title: 'A check on a typed value fails', severity: 'low', probe: 'literal', check: 'literal-check' },
+    // Claimed before the high claim on the same probe, so the report must sort them.
+    { title: 'The count is one short', severity: 'medium', probe: 'gone', check: 'count-says-three', where: '/' },
+    { title: 'The list is one item short', severity: 'high', probe: 'gone', check: 'list-has-three-items', where: '/' },
   ];
   const dismissed = [{ probe: 'misc', check: 'misc-a', reason: 'probe-wrong', why: 'selector typo' }];
 
-  test('start prints the change, the specs and the flags, and ignores run folders', () => {
+  test('start prints the change, the specs and the flags, resets app data once, and ignores run folders', async () => {
     // Ten minutes, so the coverage refusal (while more than 180 s remain)
     // still applies however slow the probes below are.
+    const resetsBefore = await app.resets();
     const r = hunt(['start', '--depth', 'quick', '--minutes', '10', '--min-severity', 'high', '--focus', 'the summary bar'], { cwd: dir });
     assert.equal(r.status, 0, r.stdout);
+    assert.equal((await app.resets()) - resetsBefore, 1);
+    assert.match(r.stdout, /^reset: app data is reset before every probe and every re-run, back to what the app holds now, and the sign-in probe then signs in again; the reset took \d+(\.\d)? s$/m);
     runId = runIdOf(r.stdout);
     assert.ok(runId, r.stdout);
     assert.match(r.stdout, /budget: 10 min \(depth quick\) \| report: high severity and above/);
@@ -108,8 +128,45 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 600_000 }
     assert.equal(ctx.deadline - ctx.startedAt, 10 * 60_000);
   });
 
+  test('each probe starts from a reset, signed in again by the sign-in probe unless it is the sign-in probe', async () => {
+    const probes = path.join(runDir(), 'probes');
+    let resets = await app.resets();
+    const signin = probe(dir, runId, 'signin', SIGNIN_PROBE).result;
+    assert.equal(signin?.checks?.[0]?.pass, true, JSON.stringify(signin));
+    // The reset, and no sign-in before the sign-in probe itself: none exists yet.
+    assert.equal((await app.resets()) - resets, 1);
+    assert.equal(signin.before.signIn, null);
+    assert.equal(signin.before.resetError, null);
+    assert.equal(typeof signin.before.resetSeconds, 'number');
+    assert.ok(!('warning' in signin));
+    assert.ok(!existsSync(path.join(probes, 'signin.1.signin.result.json')));
+
+    resets = await app.resets();
+    const again = probe(dir, runId, 'signin', SIGNIN_PROBE).result;
+    // Now it is the sign-in probe, and it is still not run twice.
+    assert.equal((await app.resets()) - resets, 1);
+    assert.equal(again.before.signIn, null);
+    assert.ok(!existsSync(path.join(probes, 'signin.2.signin.result.json')));
+
+    // The reset signs everyone out, so the items this probe reads show the
+    // sign-in probe ran again first.
+    resets = await app.resets();
+    const r = probe(dir, runId, 'reads-items', `export default async function (rr) {
+  const r = await rr.request('GET', '/api/items');
+  rr.expect('items-read', r.status === 200 && r.json.length === 2, r.status);
+}
+`).result;
+    assert.equal((await app.resets()) - resets, 1);
+    assert.equal(r.checks[0].pass, true, JSON.stringify(r));
+    assert.equal(r.before.signIn.probe, 'signin');
+    assert.equal(r.before.signIn.error, null);
+    assert.equal(typeof r.before.signIn.seconds, 'number');
+    assert.ok(!('warning' in r));
+    assert.equal(JSON.parse(readFileSync(path.join(probes, 'reads-items.1.signin.result.json'), 'utf8')).savedSession, true);
+    assert.deepEqual(JSON.parse(readFileSync(path.join(probes, 'reads-items.result.json'), 'utf8')).before, r.before);
+  });
+
   test('probes keep a numbered result per run with every request and each page viewport', () => {
-    assert.equal(probe(dir, runId, 'signin', SIGNIN_PROBE).result?.checks?.[0]?.pass, true);
     const first = probe(dir, runId, 'layout', LAYOUT);
     const second = probe(dir, runId, 'layout', LAYOUT);
     assert.equal(first.result.run, 1);
@@ -137,6 +194,7 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 600_000 }
     assert.deepEqual(echoes.map((q) => q.status), [200, 200]);
     assert.equal(probe(dir, runId, 'crashy', CRASHY).result.checks[0].pass, false);
     assert.equal(probe(dir, runId, 'literal', LITERAL).result.checks[0].pass, false);
+    assert.equal(probe(dir, runId, 'gone', GONE).result.checks[0].pass, false);
 
     // The result file keeps every request; what the probe prints lists the last 30.
     const many = probe(dir, runId, 'many', MANY);
@@ -169,22 +227,30 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 600_000 }
     assert.equal(first.status, 2, first.stdout);
     assert.match(first.stdout, /misc \/ misc-b: left unexplained/);
     assert.doesNotMatch(first.stdout, /misc \/ misc-a:/);
-    assert.match(first.stdout, /seen but never faulted: POST \/api\/login/);
-    assert.match(first.stdout, /pages never seen at 375 px: \/login/);
+    // Only the sign-in probe saw POST /api/login and /login, so neither is a gap.
+    assert.match(first.stdout, /seen but never faulted: POST \/api\/echo\n/);
+    assert.match(first.stdout, /pages never seen at 375 px: none\n/);
+    assert.doesNotMatch(first.stdout, /\/api\/login|\/login\b/);
     assert.match(first.stdout, /This is said once/);
 
     const resetsBefore = await app.resets();
     const r = finish({ findings, dismissed, leads: [{ title: 'Maybe the count lags behind', why: 'could not make it happen' }] });
     assert.equal(r.status, 0, r.stdout);
     // App data is reset before each re-run and each retry: two re-runs of
-    // each of five probes, and one retry of crashy's first.
-    assert.equal((await app.resets()) - resetsBefore, 11);
-    assert.match(r.stdout, /4 confirmed, 1 intermittent, 0 did not reproduce/);
+    // each of six probes, and one retry of crashy's first. (11 before gone
+    // was claimed: its two re-runs add 2.)
+    assert.equal((await app.resets()) - resetsBefore, 13);
+    assert.match(r.stdout, /4 confirmed, 1 intermittent, 0 did not reproduce, 2 could not re-run\n/);
     assert.match(r.stdout, /1\. HIGH {3}A failed load is shown as an empty list/);
+    // Its re-runs never got to the check, so it is not said to not reproduce.
+    assert.match(r.stdout, /\nCould not re-run, not counted:\n- The list is one item short \(probe gone, expectation "list-has-three-items"\): re-run 1 never reached the check: Error: the list was not there to check.*; re-run 2 never reached the check: Error: the list was not there to check[^\n]*\n\n/);
+    assert.doesNotMatch(r.stdout, /The count is one short/);
     assert.doesNotMatch(r.stdout, /The summary bar runs off the screen/);
-    // The medium intermittent is below the high floor, so the printed report
-    // hides it and counts it among the hidden; report.txt keeps it.
-    assert.match(r.stdout, new RegExp(`4 medium/low findings hidden: \\.stillhunter/runs/${runId}/report\\.txt`));
+    // The medium intermittent and the medium claim that could not be re-run
+    // are below the high floor, so the printed report hides them and counts
+    // them among the hidden (three confirmed, one intermittent and one that
+    // could not be re-run); report.txt keeps them.
+    assert.match(r.stdout, new RegExp(`5 medium/low findings hidden: \\.stillhunter/runs/${runId}/report\\.txt`));
     assert.doesNotMatch(r.stdout, /Intermittent \(1 of 2\), not counted/);
     assert.doesNotMatch(r.stdout, /The coin answer is wrong/);
     assert.match(r.stdout, /Coverage\nendpoints seen: /);
@@ -192,7 +258,9 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 600_000 }
 
     const report = readFileSync(path.join(runDir(), 'report.txt'), 'utf8');
     assert.match(report, /LOW {4}The summary bar runs off the screen at 375 px/);
-    assert.match(report, /Intermittent \(1 of 2\), not counted:\n- The coin answer is wrong/);
+    assert.match(report, /Intermittent \(1 of 2\), not counted:\n- The coin answer is wrong \(probe flaky, expectation "coin-ok"\): (failed on re-run 1; held on re-run 2|held on re-run 1; failed on re-run 2)\n/);
+    // Most severe first, though the medium claim was not listed last.
+    assert.match(report, /\nCould not re-run, not counted:\n- The list is one item short [^\n]*\n- The count is one short \(probe gone, expectation "count-says-three"\): re-run 1 never reached the check/);
     assert.match(report, /Dismissed:\n- misc \/ misc-a: probe-wrong: selector typo/);
     assert.match(report, /Unaccounted \(failed, neither claimed nor dismissed\):\n- misc \/ misc-b: left unexplained/);
     const saved = JSON.parse(readFileSync(path.join(runDir(), 'findings.json'), 'utf8'));
@@ -200,6 +268,12 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 600_000 }
     assert.ok(saved.notes.some((n) => /^crashy re-run 1: .*retried once$/.test(n)), saved.notes.join('\n'));
     assert.equal(saved.confirmed[0].runs.length, 2);
     assert.deepEqual(saved.intermittent.map((f) => f.probe), ['flaky']);
+    assert.deepEqual(saved.notRerunnable.map((f) => f.check), ['list-has-three-items', 'count-says-three']);
+    assert.deepEqual(saved.dropped, []);
+    assert.doesNotMatch(report, /Did not reproduce/);
+    // The sign-in went well, so nothing is said about it.
+    assert.doesNotMatch(report, /After reset/);
+    assert.equal(JSON.parse(readFileSync(path.join(runDir(), 'proof', 'empty.1.result.json'), 'utf8')).before.signIn.probe, 'signin');
     assert.deepEqual(JSON.parse(readFileSync(path.join(runDir(), 'leads.json'), 'utf8')).map((l) => l.title), ['Maybe the count lags behind']);
     const proof = readdirSync(path.join(runDir(), 'proof'));
     for (const f of ['empty.1.result.json', 'empty.2.result.json', 'flaky.1.result.json', 'flaky.2.result.json', 'empty.1.signin.result.json', 'crashy.1.result.json', 'crashy.1.retry.result.json']) assert.ok(proof.includes(f), f);
@@ -281,7 +355,9 @@ describe('the proof budget', { skip: noBrowser, timeout: 300_000 }, () => {
     const app = await startFixture();
     const dir = makeRepo(app);
     try {
-      const runId = runIdOf(hunt(['start', '--minutes', '1'], { cwd: dir }).stdout);
+      // Three minutes: room for a reset and a sign-in before each probe, and
+      // never more than the 180 s that would bring a coverage refusal.
+      const runId = runIdOf(hunt(['start', '--minutes', '3'], { cwd: dir }).stdout);
       const runDir = path.join(dir, '.stillhunter', 'runs', runId);
       assert.equal(probe(dir, runId, 'signin', SIGNIN_PROBE).result?.checks?.[0]?.pass, true);
       assert.equal(probe(dir, runId, 'layout', LAYOUT).result.checks[0].pass, false);
@@ -336,6 +412,239 @@ describe('feature mode', { skip: noBrowser, timeout: 120_000 }, () => {
       const r = hunt(['start', '--focus', 'the items list'], { cwd: dir });
       assert.equal(r.status, 0, r.stdout);
       assert.match(r.stdout, /mode: feature\. There is no change against the base, so this hunt tests "the items list" as it stands\./);
+    } finally {
+      app.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the reset at start', { skip: noBrowser, timeout: 120_000 }, () => {
+  test('a reset that fails stops start, and without a reset nothing is reset', async () => {
+    const app = await startFixture();
+    const dir = makeRepo(app);
+    try {
+      const config = path.join(dir, '.stillhunter', 'config.json');
+      writeFileSync(path.join(dir, 'bad-reset.mjs'), "process.stdout.write('resetting\\n');\nprocess.stderr.write('database is locked\\n');\nprocess.exit(3);\n");
+      writeFileSync(config, JSON.stringify({ target: { url: app.url }, reset: 'node bad-reset.mjs' }));
+      const failed = hunt(['start'], { cwd: dir });
+      assert.equal(failed.status, 1, failed.stdout);
+      assert.match(failed.stdout, /^--- stillhunter \(copy this block unchanged\) ---\nstillhunter \| stopped\nThe app's reset failed, so the hunt did not start: reset \("node bad-reset\.mjs"\) failed: exit 3: database is locked\nFix the reset/);
+      assert.ok(!existsSync(path.join(dir, '.stillhunter', 'runs')), 'no run was started');
+
+      // Without a reset, start and probe behave as before.
+      writeFileSync(config, JSON.stringify({ target: { url: app.url } }));
+      const resets = await app.resets();
+      const r = hunt(['start'], { cwd: dir });
+      assert.equal(r.status, 0, r.stdout);
+      assert.doesNotMatch(r.stdout, /^reset:/m);
+      const runId = runIdOf(r.stdout);
+      const p = probe(dir, runId, 'look', "export default async function (rr) {\n  await rr.goto('/login');\n  rr.expect('login-page', true);\n}\n").result;
+      assert.equal(p.checks[0].pass, true, JSON.stringify(p));
+      assert.ok(!('before' in p) && !('warning' in p), JSON.stringify(p));
+      assert.equal(await app.resets(), resets);
+    } finally {
+      app.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Records when it started, takes 1.5 s, and works on its first run (at
+// start) only, as a reset would that a locked database stops.
+const SLOW_THEN_FAILING_RESET = `import fs from 'node:fs';
+const n = fs.existsSync('reset-count') ? Number(fs.readFileSync('reset-count', 'utf8')) + 1 : 1;
+fs.writeFileSync('reset-count', String(n));
+if (n > 1) { process.stderr.write('database is locked\\n'); process.exit(5); }
+fs.writeFileSync('reset-started', String(Date.now()));
+await new Promise((r) => setTimeout(r, 1500));
+`;
+
+describe('the reset before a probe', { skip: noBrowser, timeout: 120_000 }, () => {
+  test('the reset at start counts against the budget, and a reset that fails before a probe is said first while the probe still runs', async () => {
+    const app = await startFixture();
+    const dir = makeRepo(app);
+    try {
+      writeFileSync(path.join(dir, 'flaky-reset.mjs'), SLOW_THEN_FAILING_RESET);
+      writeFileSync(path.join(dir, '.stillhunter', 'config.json'), JSON.stringify({ target: { url: app.url }, reset: 'node flaky-reset.mjs' }));
+      const r = hunt(['start', '--minutes', '3'], { cwd: dir });
+      assert.equal(r.status, 0, r.stdout);
+      const runId = runIdOf(r.stdout);
+      const took = Number(/the reset took (\d+(?:\.\d)?) s$/m.exec(r.stdout)?.[1]);
+      assert.ok(took >= 1.5, r.stdout);
+      // The budget's clock started before the reset did.
+      const ctx = JSON.parse(readFileSync(path.join(dir, '.stillhunter', 'runs', runId, 'context.json'), 'utf8'));
+      assert.ok(ctx.startedAt <= Number(readFileSync(path.join(dir, 'reset-started'), 'utf8')), JSON.stringify(ctx));
+      assert.equal(ctx.deadline - ctx.startedAt, 3 * 60_000);
+
+      const p = probe(dir, runId, 'look', "export default async function (rr) {\n  await rr.goto('/login');\n  rr.expect('login-page', true);\n}\n");
+      assert.equal(Object.keys(p.result)[0], 'warning', p.stdout);
+      assert.equal(p.result.warning, 'Before this probe, the reset ("node flaky-reset.mjs") failed: exit 5: database is locked. App data may not be in its reset state.');
+      assert.equal(p.result.checks[0].pass, true, 'the probe ran');
+      assert.match(p.result.before.resetError, /^reset \("node flaky-reset\.mjs"\) failed: exit 5/);
+    } finally {
+      app.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+const signinCounted = (counter, lines) => SIGNIN_PROBE.replace('export default async function (rr) {\n', `import fs from 'node:fs';
+export default async function (rr) {
+  const n = fs.existsSync('${counter}') ? Number(fs.readFileSync('${counter}', 'utf8')) + 1 : 1;
+  fs.writeFileSync('${counter}', String(n));
+`).replace('  await rr.saveSession();\n', `  await rr.saveSession();\n${lines}`);
+// Saves its session on every run; from its second run on, a later step fails,
+// as one that goes on to read data would.
+const LATE_FAILING_SIGNIN = signinCounted('signin-count', "  if (n > 1) throw new Error('a later step of the sign-in probe failed');\n");
+const ITEMS_LISTED = `export default async function (rr) {
+  const r = await rr.request('GET', '/api/items');
+  rr.expect('items-listed', r.status === 200, 'status ' + r.status);
+}
+`;
+const NO_ITEMS = `export default async function (rr) {
+  const r = await rr.request('GET', '/api/items');
+  rr.note('status', r.status);
+  rr.expect('no-items', r.status === 200 && r.json.length === 0, 'status ' + r.status + ', ' + (r.json?.length ?? 0) + ' items');
+}
+`;
+// Fails its check in the hunt; every re-run throws before it.
+const LATER = `import fs from 'node:fs';
+export default async function (rr) {
+  const n = fs.existsSync('later-count') ? Number(fs.readFileSync('later-count', 'utf8')) + 1 : 1;
+  fs.writeFileSync('later-count', String(n));
+  if (n > 1) throw new Error('the page was not there to check');
+  rr.expect('later-check', false, 'fails in the hunt');
+}
+`;
+
+describe('each claim is proved from the sign-in its hunt run had', { skip: noBrowser, timeout: 300_000 }, () => {
+  test('signed out before any sign-in, and signed in by a sign-in probe that saved its session and then failed', async () => {
+    const app = await startFixture();
+    const dir = makeRepo(app);
+    // Sessions outlive this app's reset, so a probe starts signed out only
+    // because the runner drops the run's saved session with each reset.
+    writeFileSync(path.join(dir, 'reset.mjs'), `await fetch(${JSON.stringify(`${app.url}/__reset?sessions=keep`)}, { method: 'POST' });\n`);
+    try {
+      const runId = runIdOf(hunt(['start', '--minutes', '3'], { cwd: dir }).stdout);
+      assert.ok(runId);
+      const runDir = path.join(dir, '.stillhunter', 'runs', runId);
+      // Before any sign-in probe exists, a probe runs signed out.
+      const anon = probe(dir, runId, 'anon', ITEMS_LISTED).result;
+      assert.equal(anon.checks[0].detail, 'status 401', JSON.stringify(anon));
+      assert.equal(anon.before.signIn, null);
+      assert.equal(probe(dir, runId, 'signin', LATE_FAILING_SIGNIN).result?.checks?.[0]?.pass, true);
+
+      // The sign-in before this probe saved its session, then failed: the
+      // probe ran with that session, and is told so.
+      const lists = probe(dir, runId, 'lists', NO_ITEMS);
+      assert.equal(Object.keys(lists.result)[0], 'warning', lists.stdout);
+      assert.match(lists.result.warning, /^After the reset, the sign-in probe "signin" saved a session, then failed: Error: a later step of the sign-in probe failed.*\. This probe ran with that session\. Keep the sign-in probe to signing in: it runs before every probe\.$/);
+      assert.doesNotMatch(lists.result.warning, /signed out/);
+      assert.deepEqual(lists.result.notes, [{ label: 'status', value: 200 }]);
+      assert.equal(lists.result.before.signIn.savedSession, true);
+
+      // Run again, the sign-in probe's own latest run ends in an error after
+      // saving its session. No probe signed in cleanly, so it is still the one
+      // that signs in before the next probe, which is told why it failed.
+      assert.match(probe(dir, runId, 'signin', LATE_FAILING_SIGNIN).result.error, /a later step of the sign-in probe failed/);
+      const later = probe(dir, runId, 'later', LATER);
+      assert.equal(Object.keys(later.result)[0], 'warning', later.stdout);
+      assert.match(later.result.warning, /^After the reset, the sign-in probe "signin" saved a session, then failed: Error: a later step of the sign-in probe failed.*\. This probe ran with that session\./);
+      assert.equal(later.result.before.signIn.probe, 'signin');
+      assert.equal(later.result.before.signIn.savedSession, true);
+
+      const claims = { findings: [
+        { title: 'Items are not listed', severity: 'high', probe: 'anon', check: 'items-listed' },
+        { title: 'Items are listed when there should be none', severity: 'high', probe: 'lists', check: 'no-items' },
+        { title: 'The later check fails', severity: 'medium', probe: 'later', check: 'later-check' },
+      ] };
+      const r = hunt(['finish', '--run', runId], { cwd: dir, input: JSON.stringify(claims) });
+      assert.equal(r.status, 0, r.stdout);
+      // anon is re-run signed out, as its hunt run was, so its 401 reproduces;
+      // lists is re-run after the same sign-in, which again saved its session.
+      assert.match(r.stdout, /2 confirmed, 0 intermittent, 0 did not reproduce, 1 could not re-run\n/);
+      const findings = JSON.parse(readFileSync(path.join(runDir, 'findings.json'), 'utf8'));
+      assert.deepEqual(findings.confirmed.map((f) => [f.probe, f.runs]), [['anon', ['status 401', 'status 401']], ['lists', ['status 200, 2 items', 'status 200, 2 items']]]);
+      for (const k of [1, 2]) {
+        assert.equal(JSON.parse(readFileSync(path.join(runDir, 'proof', `anon.${k}.result.json`), 'utf8')).before.signIn, null);
+        assert.equal(JSON.parse(readFileSync(path.join(runDir, 'proof', `later.${k}.result.json`), 'utf8')).before.signIn.probe, 'signin');
+        assert.equal(JSON.parse(readFileSync(path.join(runDir, 'proof', `lists.${k}.result.json`), 'utf8')).before.signIn.probe, 'signin');
+      }
+      assert.ok(findings.notes.some((n) => /^before lists 1: the sign-in probe "signin" saved a session, then failed: Error: a later step/.test(n)), findings.notes.join('\n'));
+      // later's re-runs were signed in, as its hunt run was, and threw before
+      // the check: could not re-run, with no sign-in line before it.
+      assert.match(r.stdout, /\nCould not re-run, not counted:\n- The later check fails \(probe later, expectation "later-check"\): re-run 1 never reached the check: Error: the page was not there to check/);
+      assert.doesNotMatch(r.stdout, /ran signed out/);
+      // The sign-in page and its request are not coverage; the page it landed
+      // on, and what that page asked for, are.
+      assert.deepEqual(findings.coverage.endpoints, [{ endpoint: 'GET /api/items', faults: [] }]);
+      assert.deepEqual(findings.coverage.pages.map((p) => p.page), ['/']);
+    } finally {
+      app.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Signs in on its first two runs (its own in the hunt, and again before the
+// next probe), then fails before saving a session, as a sign-in would whose
+// page changed under it.
+const FRAGILE_SIGNIN = SIGNIN_PROBE.replace('export default async function (rr) {\n', `import fs from 'node:fs';
+export default async function (rr) {
+  const n = fs.existsSync('signin-count') ? Number(fs.readFileSync('signin-count', 'utf8')) + 1 : 1;
+  fs.writeFileSync('signin-count', String(n));
+  if (n > 2) throw new Error('the sign-in form was not there');
+`);
+const NEEDS_SESSION = `export default async function (rr) {
+  const r = await rr.request('GET', '/api/items');
+  if (r.status !== 200) throw new Error('GET /api/items answered ' + r.status);
+  rr.expect('no-items-listed', r.json.length === 0, r.json);
+}
+`;
+
+describe('a sign-in that fails after a reset', { skip: noBrowser, timeout: 300_000 }, () => {
+  test('the probe says so first and runs signed out, and finish says so first and counts the claim as not re-run', async () => {
+    const app = await startFixture();
+    const dir = makeRepo(app);
+    try {
+      const runId = runIdOf(hunt(['start', '--minutes', '3'], { cwd: dir }).stdout);
+      assert.ok(runId);
+      const runDir = path.join(dir, '.stillhunter', 'runs', runId);
+      // Run before any sign-in probe existed, so signed out.
+      assert.equal(probe(dir, runId, 'anon', ITEMS_LISTED).result.checks[0].detail, 'status 401');
+      assert.equal(probe(dir, runId, 'signin', FRAGILE_SIGNIN).result?.checks?.[0]?.pass, true);
+      const needs = probe(dir, runId, 'needs', NEEDS_SESSION).result;
+      assert.equal(needs.checks[0].pass, false, JSON.stringify(needs));
+      assert.ok(!('warning' in needs));
+
+      // The third sign-in fails: the probe still runs, signed out, and its
+      // output starts by saying why.
+      const after = probe(dir, runId, 'after', "export default async function (rr) {\n  const r = await rr.request('GET', '/api/items');\n  rr.note('status', r.status);\n}\n");
+      assert.equal(Object.keys(after.result)[0], 'warning', after.stdout);
+      assert.match(after.result.warning, /^After the reset, the sign-in probe "signin" failed: Error: the sign-in form was not there.*\. This probe ran signed out\.$/);
+      assert.deepEqual(after.result.notes, [{ label: 'status', value: 401 }]);
+      const saved = JSON.parse(readFileSync(path.join(runDir, 'probes', 'after.result.json'), 'utf8'));
+      assert.match(saved.before.signIn.error, /the sign-in form was not there/);
+
+      const claims = { findings: [
+        { title: 'Items are not listed', severity: 'high', probe: 'anon', check: 'items-listed' },
+        { title: 'Items are listed when there should be none', severity: 'high', probe: 'needs', check: 'no-items-listed' },
+      ] };
+      const r = hunt(['finish', '--run', runId], { cwd: dir, input: JSON.stringify(claims) });
+      assert.equal(r.status, 0, r.stdout);
+      // anon is re-run signed out, as its hunt run was, though "signin" is
+      // still the sign-in probe: nothing signs in before it.
+      assert.match(r.stdout, /1 confirmed, 0 intermittent, 0 did not reproduce, 1 could not re-run\n/);
+      for (const k of [1, 2]) assert.equal(JSON.parse(readFileSync(path.join(runDir, 'proof', `anon.${k}.result.json`), 'utf8')).before.signIn, null);
+      // needs' hunt run was signed in and its re-runs were not, so they say nothing.
+      assert.match(r.stdout, /\nCould not re-run, not counted:\nAfter reset, the sign-in probe "signin" failed: Error: the sign-in form was not there.*\. Each claimed probe then ran signed out\.\n- Items are listed when there should be none \(probe needs, expectation "no-items-listed"\): re-run 1 does not count: it ran signed out, as the sign-in after the reset failed, which it had not before the hunt run; re-run 2 does not count: /);
+      const findings = JSON.parse(readFileSync(path.join(runDir, 'findings.json'), 'utf8'));
+      assert.deepEqual(findings.notRerunnable.map((f) => f.probe), ['needs']);
+      assert.deepEqual(findings.confirmed.map((f) => [f.probe, f.runs]), [['anon', ['status 401', 'status 401']]]);
+      assert.deepEqual(findings.dropped, []);
+      assert.ok(findings.notes.some((n) => /^before needs 1: signing in again with "signin" failed: Error: the sign-in form was not there/.test(n)), findings.notes.join('\n'));
+      assert.match(readFileSync(path.join(runDir, 'report.txt'), 'utf8'), /\nCould not re-run, not counted:\nAfter reset, the sign-in probe "signin" failed: Error: the sign-in form was not there.*\. Each claimed probe then ran signed out\.\n/);
     } finally {
       app.stop();
       rmSync(dir, { recursive: true, force: true });

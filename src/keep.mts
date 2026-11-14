@@ -7,8 +7,8 @@ import path from 'node:path';
 import { chooseBrowser, installedOnThisMachine } from './browser.mjs';
 import { ensureRunsIgnored } from './change.mjs';
 import { block, type Context, fail, findTargetUrl, FOLDER, flag, loadRun, PROBE_NAME, readConfig, repoRoot, runsDir, signInVariableNames, stamp, testsDir } from './common.mjs';
-import { resetApp } from './finish.mjs';
 import { runProbe } from './probe-host.mjs';
+import { resetApp } from './reset.mjs';
 import { outcome, probesDir, type ProbeResult, signInProbe } from './results.mjs';
 import { answers } from './target.mjs';
 
@@ -161,7 +161,7 @@ export async function replay(args: string[]): Promise<void> {
   let failed = 0;
   for (const t of selected) {
     if (config.reset) {
-      const r = resetApp(root, config);
+      const r = await resetApp(root, config);
       if (r) notes.push(`before ${t.name}: ${r}`);
       await signIn();
     }

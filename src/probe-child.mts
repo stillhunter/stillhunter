@@ -9,7 +9,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Browser, BrowserContext, Locator, Page, Request, Route } from 'playwright-core';
 import { layoutCandidates } from './layout.mjs';
-import type { Check, FaultRecord, PageRecord, ProbeResult, RequestRecord } from './results.mjs';
+import type { Check, FaultRecord, PageRecord, ProbeResult, RequestRecord, SignInFlow } from './results.mjs';
 
 export interface ChildJob {
   nonce: string;
@@ -97,6 +97,10 @@ async function run(job: ChildJob): Promise<ProbeResult> {
   const activeFaults: { pattern: string | RegExp; handler: (route: Route) => Promise<void> }[] = [];
   let offline = false;
   let savedSession = false;
+  let signInFlow: SignInFlow | null = null;
+  // Where in `requests` each page's latest navigation began, so a sign-in can
+  // be told apart from the page it lands on.
+  const navigatedAt = new Map<Page, number>();
 
   // The page the probe last worked with is the one `final` observes.
   let lastPage: Page | null = null;
@@ -116,7 +120,11 @@ async function run(job: ChildJob): Promise<ProbeResult> {
     const id = pageIds.get(p)!.id;
     p.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(clip(m.text(), 300)); });
     p.on('pageerror', (e) => pageErrors.push(clip(String(e?.message ?? e), 300)));
-    p.on('framenavigated', (f) => { if (f === p.mainFrame()) visit(p); });
+    p.on('framenavigated', (f) => {
+      if (f !== p.mainFrame()) return;
+      navigatedAt.set(p, requests.length);
+      visit(p);
+    });
     p.on('request', (req) => {
       if (!isApi(req)) return;
       const rec: RequestRecord = { method: req.method(), url: req.url(), status: null, fault: null, via: 'page', page: id };
@@ -237,6 +245,14 @@ async function run(job: ChildJob): Promise<ProbeResult> {
     },
     async saveSession() {
       await mainContext.storageState({ path: job.sessionFile });
+      // The first save ends the sign-in: the pages before the one it landed
+      // on, and the requests made before that page, are how it signed in.
+      if (!savedSession) {
+        const landed = lastPage ?? page;
+        const landing = landed.url();
+        const seen = [...pageIds.values()].flatMap((r) => r.visited.map((v) => v.url));
+        signInFlow = { requests: navigatedAt.get(landed) ?? requests.length, pages: [...new Set(seen)].filter((u) => u !== landing) };
+      }
       savedSession = true;
     },
     // Makes matching requests fail, hang, slow down or answer with other data,
@@ -392,6 +408,7 @@ async function run(job: ChildJob): Promise<ProbeResult> {
     hostError: timedOut ? 'timeout' : null,
     blocked,
     savedSession,
+    ...(signInFlow ? { signInFlow } : {}),
     shots,
     requests,
     faults,
@@ -401,9 +418,18 @@ async function run(job: ChildJob): Promise<ProbeResult> {
   };
 }
 
+// A failure before the probe ran: its message, the path the permission model
+// refused when that is the cause (Node's message leaves it out), and where.
+export function fatalText(e: unknown): string {
+  const err = e as (Error & { code?: string; resource?: string }) | undefined;
+  const refused = err?.resource ? `(${err.code ?? 'refused'}: ${err.resource})` : '';
+  const where = String(err?.stack ?? '').split('\n').slice(1, 4).map((l) => l.trim()).join(' | ');
+  return [String(err?.message ?? e), refused, where].filter(Boolean).join(' ');
+}
+
 process.once('message', (job: ChildJob) => {
   run(job).then(
     (result) => process.send?.({ nonce: job.nonce, result }, () => process.exit(0)),
-    (e) => process.send?.({ nonce: job.nonce, fatal: clip(String((e as Error)?.message ?? e), 800) }, () => process.exit(0)),
+    (e) => process.send?.({ nonce: job.nonce, fatal: clip(fatalText(e), 800) }, () => process.exit(0)),
   );
 });

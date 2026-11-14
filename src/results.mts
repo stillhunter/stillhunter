@@ -10,6 +10,19 @@ export interface PageRecord { id: number; viewport: { width: number; height: num
 
 export type HostError = 'timeout' | 'crash' | 'no-result';
 
+// What ran before a probe when the config has a reset: the reset, and the
+// run's sign-in probe again (null when none ran: there was none yet, or this
+// probe is the sign-in probe). A sign-in can fail after it saved a session.
+export interface Before {
+  resetSeconds: number;
+  resetError: string | null;
+  signIn: { probe: string; seconds: number; error: string | null; savedSession?: boolean } | null;
+}
+
+// What a probe saw while it signed in, up to the page it landed on: the
+// number of requests made before that page, and the pages visited before it.
+export interface SignInFlow { requests: number; pages: string[] }
+
 export interface ProbeResult {
   probe: string;
   run?: number;
@@ -29,6 +42,9 @@ export interface ProbeResult {
   pages: PageRecord[];
   final: unknown;
   output: string;
+  before?: Before;
+  // Set by the first rr.saveSession() of the run.
+  signInFlow?: SignInFlow;
 }
 
 export function emptyResult(probe: string, error: string, hostError: HostError): ProbeResult {
@@ -99,11 +115,18 @@ export function allResults(runDir: string): ProbeResult[] {
 
 // The probe that signed in: the latest one whose run saved the session.
 export function signInProbe(runDir: string): string | null {
-  let best: { name: string; at: number } | null = null;
+  // The latest probe whose run saved a session and ended without an error;
+  // failing that, the latest that saved a session and failed after it. Its
+  // session is still good, and every run of it says that it failed, so a
+  // sign-in probe with a broken last step never leaves the hunt signed out.
+  let clean: { name: string; at: number } | null = null;
+  let saved: { name: string; at: number } | null = null;
   for (const [name, r] of latestResults(runDir)) {
-    if (!r.savedSession || r.error) continue;
+    if (!r.savedSession) continue;
     const at = r.finishedAt ?? 0;
-    if (!best || at > best.at) best = { name, at };
+    if (!r.error) {
+      if (!clean || at > clean.at) clean = { name, at };
+    } else if (!saved || at > saved.at) saved = { name, at };
   }
-  return best?.name ?? null;
+  return (clean ?? saved)?.name ?? null;
 }

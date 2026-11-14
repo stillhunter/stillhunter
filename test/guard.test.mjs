@@ -93,7 +93,7 @@ test('the hunter runs only the runner, typed exactly, with at most a quoted here
     `node "${root}/../${path.basename(root)}/dist/hunt.mjs" start`,
     `node "${root}/./dist/hunt.mjs" start`,
     `node "${root}/dist/../dist/hunt.mjs" start`,
-    `node "${root.replace(/\//g, '\\\\')}/dist/hunt.mjs" start`,
+    `node "${root.replace(/[\\/]/g, '\\\\')}/dist/hunt.mjs" start`,
     `node "!!/dist/hunt.mjs" start`,
     'node "dist/hunt.mjs" start',
   ];

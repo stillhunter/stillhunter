@@ -10,3 +10,6 @@ __pycache__/
 test-results/
 playwright-report/
 *.db
+
+# Tuning runs: working data, kept out of the record
+benchmark/comparison/results-*/

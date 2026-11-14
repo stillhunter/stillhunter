@@ -40,6 +40,8 @@ export interface HostJob {
 // The child's one writable place for a session and its own scratch, shared by
 // every probe of a run so a saved session carries from one probe to the next.
 export const scratchDir = (runDir: string) => path.join(runDir, 'scratch');
+// The session the run's sign-in saved, which every probe of the run starts from.
+export const sessionPath = (runDir: string) => path.join(scratchDir(runDir), 'session.json');
 
 // Node 22 has no network permission; later versions have one switch for all
 // of it, and the child needs it to reach the browser. Either way a probe's own
@@ -55,12 +57,24 @@ function both(p: string): string[] {
   }
 }
 
+// When playwright-core loads on Linux it asks whether it runs under WSL or in a
+// container, by reading these system files. One of those checks is not
+// wrapped in a try, and the permission model makes a refused existsSync throw,
+// so without them every probe would stop before it ran. They hold no user data,
+// and they are granted as exact paths.
+export const LINUX_PLATFORM_FILES = ['/proc/version', '/proc/sys/fs/binfmt_misc/WSLInterop', '/run/WSL', '/run/.containerenv', '/.dockerenv', '/proc/self/cgroup'];
+
 // Reads cover the run folder (its own probe, session and results) and this
 // package's compiled code and playwright-core, but not the package root, so a
 // dev checkout's repository, node_modules and benchmark answers stay unread.
 // Writes cover only the folders the child owns.
-export function permissionArgs(runDir: string, writeDirs: string[]): string[] {
-  const reads = [...new Set([runDir, HERE, playwrightCoreDir()].map((p) => path.resolve(p)).flatMap(both))];
+export function permissionArgs(runDir: string, writeDirs: string[], platform: NodeJS.Platform = process.platform): string[] {
+  const reads = [
+    ...new Set([
+      ...[runDir, HERE, playwrightCoreDir()].map((p) => path.resolve(p)).flatMap(both),
+      ...(platform === 'linux' ? LINUX_PLATFORM_FILES : []),
+    ]),
+  ];
   const writes = [...new Set(writeDirs.map((p) => path.resolve(p)).flatMap(both))];
   return [
     '--permission',
@@ -129,7 +143,7 @@ export async function runProbe(job: HostJob): Promise<ProbeResult> {
   const scratch = scratchDir(job.runDir);
   mkdirSync(job.shotsDir, { recursive: true });
   mkdirSync(scratch, { recursive: true });
-  const sessionFile = path.join(scratch, 'session.json');
+  const sessionFile = sessionPath(job.runDir);
   const before = sessionValues(sessionFile);
   const timeoutMs = job.timeoutMs ?? PROBE_TIMEOUT_MS;
   const { chromium } = await import('playwright-core');

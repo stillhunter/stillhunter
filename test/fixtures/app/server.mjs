@@ -2,7 +2,8 @@
 // - at 375 px the summary bar runs past the right edge of the screen;
 // - when loading the list fails, the page says the list is empty;
 // - GET /api/coin answers ok on every second call, so a check on it is flaky.
-// POST /__reset puts the data back and signs everyone out, and GET /__resets
+// POST /__reset puts the data back and signs everyone out (with ?sessions=keep
+// the sessions outlive it, as stateless or separately stored ones do), and GET /__resets
 // says how many times it ran; POST /__fix removes the empty-list defect.
 // Sign-in uses SHFIX_EMAIL and SHFIX_PASSWORD.
 //   node server.mjs   (prints "listening <port>")
@@ -85,7 +86,7 @@ const server = createServer(async (req, res) => {
   const signedIn = sessions.has(cookie(req));
   if (req.method === 'POST' && url.pathname === '/__reset') {
     items = structuredClone(START_ITEMS);
-    sessions = new Set();
+    if (url.searchParams.get('sessions') !== 'keep') sessions = new Set();
     resets += 1;
     return json(res, 200, { ok: true });
   }

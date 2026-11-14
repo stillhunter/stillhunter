@@ -6,6 +6,11 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEMO, FEATURES, lanePorts, seed } from './seed.mjs';
+
+// The app's features, its demo sign-in, the lane ports and the sample data
+// live in seed.mjs, which a trial copies next to the variant.
+export { DEMO, FEATURES, lanePorts, seed };
 
 export const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const REPO = path.resolve(HERE, '..', '..');
@@ -15,9 +20,6 @@ export const MODEL = 'claude-opus-5-5';
 export const MINUTES = 30; // stated to every arm
 export const HARD_LIMIT_MS = 45 * 60 * 1000; // every arm is killed after this
 export const PLAYWRIGHT_MCP = '0.0.83';
-export const DEMO = { DEMO_EMAIL: 'demo@example.com', DEMO_PASSWORD: 'demo-password' };
-
-export const FEATURES = ['harvest-stats', 'plant-journal', 'watering-log'];
 export const BUGS = {
   'harvest-stats': ['error-shown-as-empty', 'to-date-excluded'],
   'plant-journal': ['search-quote-crash', 'failed-save-clears-text'],
@@ -32,7 +34,6 @@ export const ALL_ARMS = ['baseline', 'playwright', 'stillhunter'];
 // BENCH_ARMS picks which arms a schedule and its analysis cover.
 export const ARMS = process.env.BENCH_ARMS ? process.env.BENCH_ARMS.split(',') : ['playwright', 'stillhunter'];
 
-export const lanePorts = (lane) => ({ web: 3790 + lane, api: 8790 + lane });
 export const trialId = (v, arm, n) => `${v.feature}__${v.bug}__${arm}__t${n}`;
 
 // Committed result files name temporary folders as $TMPDIR/... and the home
@@ -132,41 +133,6 @@ export async function startApp(dir, lane, logFile) {
   return stop;
 }
 
-// The same sample data for every arm of a feature.
-export async function seed(lane, feature) {
-  const { api } = lanePorts(lane);
-  const base = `http://127.0.0.1:${api}/api`;
-  const login = await fetch(`${base}/auth/login`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: DEMO.DEMO_EMAIL, password: DEMO.DEMO_PASSWORD }),
-  });
-  if (!login.ok) throw new Error(`seed login failed: ${login.status}`);
-  const cookie = login.headers.get('set-cookie').split(';')[0];
-  const post = async (p, body) => {
-    const res = await fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify(body) });
-    if (!res.ok) throw new Error(`seed POST ${p} failed: ${res.status} ${await res.text()}`);
-    return res.json();
-  };
-  const north = await post('/beds', { name: 'North bed', sunlight: 'full_sun', notes: '' });
-  const shade = await post('/beds', { name: 'Shade corner', sunlight: 'shade', notes: '' });
-  const tomato = await post('/plants', { name: 'Tomato', variety: 'Sungold', bed_id: north.id, planted_on: '2026-04-10' });
-  const courgette = await post('/plants', { name: 'Courgette', variety: '', bed_id: north.id, planted_on: '2026-05-02' });
-  const lettuce = await post('/plants', { name: 'Lettuce', variety: 'Little Gem', bed_id: shade.id, planted_on: '2026-03-20' });
-  for (const [plant, grams, on] of [
-    [tomato, 300, '2025-08-10'], [tomato, 450, '2026-07-15'], [tomato, 600, '2026-08-03'],
-    [courgette, 1200, '2026-07-20'], [lettuce, 200, '2026-06-05'], [lettuce, 150, '2026-09-30'],
-  ]) await post('/harvests', { plant_id: plant.id, weight_grams: grams, harvested_on: on });
-  if (feature === 'plant-journal') {
-    await post('/journal', { plant_id: tomato.id, entry_on: '2026-06-01', body: 'First flowers opened; watered deeply.' });
-    await post('/journal', { plant_id: tomato.id, entry_on: '2026-07-02', body: 'Tied the stems to canes.' });
-    await post('/journal', { plant_id: lettuce.id, entry_on: '2026-05-14', body: 'Thinned the seedlings.' });
-  }
-  if (feature === 'watering-log') {
-    await post('/waterings', { bed_id: north.id, watered_on: '2026-11-01', litres: 10 });
-    await post('/waterings', { bed_id: shade.id, watered_on: '2026-11-05', litres: 4 });
-  }
-}
-
 export function checklist() {
   const text = readFileSync(path.join(HERE, 'prompts/checklist.md'), 'utf8');
   return text.split('\n').filter((l) => /^\d+\. /.test(l)).join('\n');
@@ -195,6 +161,8 @@ export function runClaude({ cwd, arm, text, sessionId, outDir, mcpFile, pluginDi
     '--permission-mode', 'bypassPermissions', '--output-format', 'json', '--session-id', sessionId, '--add-dir', outDir];
   if (arm === 'playwright') args.push('--mcp-config', mcpFile);
   if (arm === 'stillhunter') args.push('--plugin-dir', checkPluginDir(pluginDir));
+  // BENCH_MAX_BUDGET_USD stops a session once it has spent that much.
+  if (process.env.BENCH_MAX_BUDGET_USD) args.push('--max-budget-usd', process.env.BENCH_MAX_BUDGET_USD);
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn('claude', args, { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...DEMO } });
