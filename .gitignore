@@ -13,3 +13,6 @@ playwright-report/
 
 # Tuning runs: working data, kept out of the record
 benchmark/comparison/results-*/
+
+# Raw benchmark output: large and full of local paths; the report is the record
+benchmark/comparison/results/

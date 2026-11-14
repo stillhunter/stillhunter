@@ -59,7 +59,7 @@ The `.stillhunter/` folder holds a signed-in session in each run folder; `start`
 
 ## Where it stands
 
-Stillhunter grew out of [rough-ride](https://github.com/rough-ride/rough-ride). Its engine's first test, on six bugs kept from its author until the engine was frozen, caught the planted bug in 15 of 18 runs with 0.4 false alarms per run. Claude Code with Playwright and a resilience checklist caught 18 of 18 with 3.3 ([report](https://github.com/rough-ride/rough-ride/blob/main/benchmark/comparison/REPORT-hunt.md)). This release closes the gaps that test found ([design](docs/design-0.2.md)) and is measured again on new bugs before it claims anything.
+Stillhunter grew out of [rough-ride](https://github.com/rough-ride/rough-ride). Its engine's first test, on six bugs kept from its author until the engine was frozen, caught the planted bug in 15 of 18 runs with 0.4 false alarms per run. Claude Code with Playwright and a resilience checklist caught 18 of 18 with 3.3 ([report](https://github.com/rough-ride/rough-ride/blob/main/benchmark/comparison/REPORT-hunt.md)). This release closes the gaps that test found ([design](docs/design-0.2.md)). On six new held-out bugs, 0.2.0 caught the planted bug in 17 of 18 runs with 0.41 false alarms per run, against 15 of 18 with 3.15 for Claude Code with Playwright ([report](benchmark/comparison/REPORT-heldout-0.2.md)). With 18 paired runs the recall gap is not significant; the false-alarm gap is.
 
 ## Licence
 
