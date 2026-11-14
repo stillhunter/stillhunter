@@ -10,8 +10,10 @@ import { describe, test } from 'node:test';
 import { DECOY, HUNT, hunt, makeRepo, noBrowser, probe, runIdOf, SIGN_IN, SIGNIN_PROBE, startFixture } from './helpers.mjs';
 
 // Room for the two probes proved first, each re-run after a reset and a
-// sign-in, on a slow CI runner, and for the hanging re-run to start after them.
-const WALL_SECONDS = 150;
+// sign-in, on a slow CI runner, and for the hanging re-run to start after
+// them; short enough that the wall limit, not the probe's own 100 s time
+// limit, is what cuts that re-run short.
+const WALL_SECONDS = 120;
 
 const EMPTY = `export default async function (rr) {
   const f = await rr.fault('**/api/items', 500);
