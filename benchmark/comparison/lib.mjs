@@ -147,8 +147,17 @@ export function prompt(arm, vars) {
   return text.trim();
 }
 
+// PW_MCP_DIR names a folder with @playwright/mcp at PLAYWRIGHT_MCP installed
+// (npm install @playwright/mcp@<version> there); the playwright arm and the
+// verifier run it from there.
+export function playwrightMcpCli(env = process.env) {
+  const cli = env.PW_MCP_DIR ? path.join(env.PW_MCP_DIR, 'node_modules/@playwright/mcp/cli.js') : null;
+  if (!cli || !existsSync(cli)) throw new Error(`PW_MCP_DIR must name a folder with @playwright/mcp@${PLAYWRIGHT_MCP} installed: ${env.PW_MCP_DIR ?? 'not set'}`);
+  return cli;
+}
+
 export function mcpConfig(file, outDir) {
-  const cli = path.join(process.env.PW_MCP_DIR, 'node_modules/@playwright/mcp/cli.js');
+  const cli = playwrightMcpCli();
   writeFileSync(file, JSON.stringify({ mcpServers: { playwright: {
     command: 'node',
     args: [cli, '--headless', '--isolated', '--browser', 'chrome', '--caps', 'network,storage', '--output-dir', outDir],

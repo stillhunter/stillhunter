@@ -10,7 +10,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { ALL_ARMS, checkPluginDir, outsideRepo, REPO, runClaude, seed, VARIANTS } from '../benchmark/comparison/lib.mjs';
+import { ALL_ARMS, checkPluginDir, outsideRepo, playwrightMcpCli, REPO, runClaude, seed, VARIANTS } from '../benchmark/comparison/lib.mjs';
 import { findingsFileState, huntFindings, huntFinishes, prepareTrial, SEED } from '../benchmark/comparison/trial.mjs';
 import { baseRef, collectChange } from '../dist/change.mjs';
 
@@ -68,6 +68,17 @@ test('the claude call gets the checked plugin folder, never the repository', { s
   const args = JSON.parse(readFileSync(path.join(dir, 'args.json'), 'utf8'));
   assert.equal(args[args.indexOf('--plugin-dir') + 1], plugin);
   assert.throws(() => runClaude({ ...call, pluginDir: REPO }), /inside the repository/);
+});
+
+test('the playwright arm needs PW_MCP_DIR with @playwright/mcp installed, and says so', (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'sh-pwmcp-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.throws(() => playwrightMcpCli({}), /PW_MCP_DIR must name a folder with @playwright\/mcp@[\d.]+ installed: not set/);
+  assert.throws(() => playwrightMcpCli({ PW_MCP_DIR: dir }), /PW_MCP_DIR must name a folder/);
+  const cli = path.join(dir, 'node_modules', '@playwright', 'mcp', 'cli.js');
+  mkdirSync(path.dirname(cli), { recursive: true });
+  writeFileSync(cli, '');
+  assert.equal(playwrightMcpCli({ PW_MCP_DIR: dir }), cli);
 });
 
 test('a claude that cannot be started ends the call at once with the reason', async (t) => {
