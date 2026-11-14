@@ -1,10 +1,45 @@
 # Stillhunter
 
-**In development. Not released yet.**
-
 Stillhunter is a Claude Code plugin that hunts bugs in a change to your web app the way a careful QA engineer would. It reads the change, plans what could break, tests each idea in a real browser with failing, slow and malformed requests and bad input, and reports only bugs it has made happen twice from scratch. Each finding comes with the probe script that shows it, and you can keep it as a test that replays with no model.
 
 Still-hunting is a way of hunting: move slowly and quietly, stop, watch, and act only when sure.
+
+## Install
+
+You need Claude Code (tested with 2.1.311 and 2.1.325), Node.js 22.22 or later, and Chrome, Edge or Chromium installed. In Claude Code:
+
+```
+/plugin marketplace add stillhunter/stillhunter
+/plugin install stillhunter@stillhunter
+```
+
+## Quick start
+
+1. Start your app's dev server. A Nuxt app in this repository is found by itself. For any other app (Next, Vite, Rails, anything that serves a page on localhost), say where it runs in `.stillhunter/config.json`:
+
+   ```json
+   { "target": { "url": "http://localhost:3000" } }
+   ```
+
+2. If the app needs a sign-in, export the test account's credentials in the shell you start Claude Code from, in variables named like `APP_EMAIL` and `APP_PASSWORD` (see [Configuration](#configuration)).
+3. Make your change on a branch, then run `/stillhunter:hunt` in Claude Code. The change is what differs from `main` (or `master`); with no change, name a feature: `/stillhunter:hunt the invite dialog`.
+4. After about 10 minutes you get a report like this one, from a hunt on a benchmark app:
+
+   ```
+   stillhunter | 6m21s | run 20261114-100317-hunt-ea44 | 4 confirmed, 0 intermittent, 0 did not reproduce
+   target: http://localhost:3793 | asked: the change
+
+   Findings (each reproduced twice from scratch)
+   1. MEDIUM Record past watering accepts a negative amount and counts it in the totals
+      where: /beds, Record past watering form; POST /api/waterings
+      expected: A negative number of litres is refused with a visible reason (the form only rejects 0)
+      saw: {"stored":[{"id":3,"bed_id":1,"bed_name":"North bed","watered_on":"2026-11-14","watered_at":null,"litres":-5}],"text":["Recorded -5 L on 14 Nov 2026."]}
+      repro: .stillhunter/runs/20261114-100317-hunt-ea44/probes/beds-water.mjs (expectation "negative-litres-refused")
+   ```
+
+5. Keep a finding as a test with `/stillhunter:keep 1`, and run kept tests with `/stillhunter:replay` or `npx stillhunter replay`.
+
+If your app keeps data, add a `reset` command to the config so every probe starts from the same data; see [Configuration](#configuration). Probes run model-written code under limits described in [What a probe can and cannot do](#what-a-probe-can-and-cannot-do); read that section before you point a hunt at anything but a local dev server with test data.
 
 ## Commands
 
@@ -60,6 +95,10 @@ The `.stillhunter/` folder holds a signed-in session in each run folder; `start`
 ## Where it stands
 
 Stillhunter grew out of [rough-ride](https://github.com/rough-ride/rough-ride). Its engine's first test, on six bugs kept from its author until the engine was frozen, caught the planted bug in 15 of 18 runs with 0.4 false alarms per run. Claude Code with Playwright and a resilience checklist caught 18 of 18 with 3.3 ([report](https://github.com/rough-ride/rough-ride/blob/main/benchmark/comparison/REPORT-hunt.md)). This release closes the gaps that test found ([design](docs/design-0.2.md)). On six new held-out bugs, 0.2.0 caught the planted bug in 17 of 18 runs with 0.41 false alarms per run, against 15 of 18 with 3.15 for Claude Code with Playwright ([report](benchmark/comparison/REPORT-heldout-0.2.md)). With 18 paired runs the recall gap is not significant; the false-alarm gap is.
+
+## Changes and security
+
+See [CHANGELOG.md](CHANGELOG.md). Report a vulnerability as described in [SECURITY.md](SECURITY.md).
 
 ## Licence
 
