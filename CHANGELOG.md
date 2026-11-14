@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 (2026-11-14)
+
+- The package now ships `npm-shrinkwrap.json`, so Claude Code installs `playwright-core` when it installs the plugin from the marketplace. 0.2.0 shipped without a lockfile, and an install from the marketplace failed at its first command with `Cannot find module 'playwright-core/lib/utilsBundle'`.
+- The release workflow installs the tarball through Claude Code on Linux, macOS and Windows and runs it before staging it.
+
 ## 0.2.0 (2026-11-14)
 
 The first release of Stillhunter as a Claude Code plugin. The engine grew out of [rough-ride](https://github.com/rough-ride/rough-ride)'s hunt engine; [docs/design-0.2.md](docs/design-0.2.md) lists what its first test found and how this release answers each point.

@@ -1,6 +1,6 @@
 {
   "name": "stillhunter",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Hunts bugs in a web app change the way a careful QA engineer would, and reports only bugs it has made happen twice in a real browser.",
   "license": "MIT",
   "keywords": [
@@ -28,7 +28,8 @@
     "agents/",
     "hooks/",
     "dist/",
-    "README.md"
+    "README.md",
+    "npm-shrinkwrap.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

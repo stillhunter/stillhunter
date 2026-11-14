@@ -45,6 +45,22 @@ test('the package the harness packs holds no benchmark, test or source folder', 
   const files = JSON.parse(r.stdout)[0].files.map((f) => f.path);
   assert.ok(files.includes('dist/hunt.mjs') && files.includes('hooks/guard.mjs') && files.includes('agents/hunter.md'), files.join(', '));
   assert.deepEqual(files.filter((f) => /^(benchmark|test|src|docs)\//.test(f)), []);
+  // Claude Code installs a plugin's packages only from a lockfile beside its
+  // package.json, and npm publishes only this one.
+  assert.ok(files.includes('npm-shrinkwrap.json'), files.join(', '));
+});
+
+test('the published lockfile pins every dependency package.json names, from the registry', () => {
+  const pkg = JSON.parse(readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  const lock = JSON.parse(readFileSync(path.join(REPO, 'npm-shrinkwrap.json'), 'utf8'));
+  assert.equal(lock.version, pkg.version);
+  assert.deepEqual(lock.packages[''].dependencies, pkg.dependencies);
+  assert.deepEqual(lock.packages[''].devDependencies, pkg.devDependencies);
+  for (const name of Object.keys(pkg.dependencies)) {
+    const entry = lock.packages[`node_modules/${name}`];
+    assert.equal(entry?.version, pkg.dependencies[name], name);
+    assert.match(entry.resolved, /^https:\/\/registry\.npmjs\.org\//, name);
+  }
 });
 
 // The comparison runs on macOS and Linux: it stops a session by its process

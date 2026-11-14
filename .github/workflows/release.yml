@@ -62,8 +62,27 @@ jobs:
           mkdir unpacked && tar -xzf tarball/stillhunter-*.tgz -C unpacked
           (cd unpacked/package && npm install --omit=dev --ignore-scripts --no-audit --no-fund)
           claude plugin validate --strict unpacked/package
+      # Installs the tarball the way a user's Claude Code does: copied into the
+      # plugin cache, with its packages installed from npm-shrinkwrap.json.
+      # 0.2.0 shipped without a lockfile and so without playwright-core.
+      - name: Install the tarball through Claude Code and run it
+        shell: bash
+        run: |
+          mkdir -p pkg mkt/.claude-plugin
+          tar -xzf tarball/stillhunter-*.tgz -C pkg --strip-components=1
+          git -C pkg init -q
+          git -C pkg add -A
+          git -C pkg -c user.name=ci -c user.email=ci@example.invalid commit -qm tarball
+          here="$PWD"
+          if [ "$RUNNER_OS" = Windows ]; then here="/$(cygpath -m "$PWD")"; fi
+          printf '{"name":"stillhunter","owner":{"name":"ci"},"plugins":[{"name":"stillhunter","source":{"source":"url","url":"file://%s/pkg"}}]}\n' "$here" > mkt/.claude-plugin/marketplace.json
+          export CLAUDE_CONFIG_DIR="$PWD/cfg"
+          claude plugin marketplace add ./mkt
+          claude plugin install stillhunter@stillhunter
+          root=$(ls -d cfg/plugins/cache/stillhunter/stillhunter/*/)
+          test -f "$root/node_modules/playwright-core/package.json"
           # An unknown command prints the usage to stderr and exits 1.
-          if out=$(node unpacked/package/dist/hunt.mjs bogus 2>&1); then echo 'expected a nonzero exit'; exit 1; fi
+          if out=$(node "$root/dist/hunt.mjs" bogus 2>&1); then echo 'expected a nonzero exit'; exit 1; fi
           grep -q 'Usage:' <<<"$out"
 
   publish:
