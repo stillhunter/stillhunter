@@ -47,7 +47,10 @@ test('the package the harness packs holds no benchmark, test or source folder', 
   assert.deepEqual(files.filter((f) => /^(benchmark|test|src|docs)\//.test(f)), []);
 });
 
-test('the claude call gets the checked plugin folder, never the repository', async (t) => {
+// The comparison runs on macOS and Linux: it stops a session by its process
+// group, and starts claude without a shell, which on Windows cannot run this
+// stand-in script.
+test('the claude call gets the checked plugin folder, never the repository', { skip: process.platform === 'win32' && 'the comparison runs on macOS and Linux' }, async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'sh-claude-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const plugin = fakePlugin(path.join(dir, 'plugin'));
@@ -65,6 +68,19 @@ test('the claude call gets the checked plugin folder, never the repository', asy
   const args = JSON.parse(readFileSync(path.join(dir, 'args.json'), 'utf8'));
   assert.equal(args[args.indexOf('--plugin-dir') + 1], plugin);
   assert.throws(() => runClaude({ ...call, pluginDir: REPO }), /inside the repository/);
+});
+
+test('a claude that cannot be started ends the call at once with the reason', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'sh-claude-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const plugin = fakePlugin(path.join(dir, 'plugin'));
+  const oldPath = process.env.PATH;
+  process.env.PATH = path.join(dir, 'empty');
+  t.after(() => { process.env.PATH = oldPath; });
+  const r = await runClaude({ cwd: dir, arm: 'stillhunter', text: '/stillhunter:hunt', sessionId: 's', outDir: dir, mcpFile: null, pluginDir: plugin });
+  assert.equal(r.code, null);
+  assert.equal(r.killed, false);
+  assert.match(r.stderr, /claude could not be started: spawn claude ENOENT/);
 });
 
 test('each hunt run\'s findings.json is read for its findings and its finish, and a missing or broken one is a failed run', (t) => {

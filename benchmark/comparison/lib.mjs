@@ -171,10 +171,16 @@ export function runClaude({ cwd, arm, text, sessionId, outDir, mcpFile, pluginDi
     child.stderr.on('data', (d) => err.push(d));
     let killed = false;
     const timer = setTimeout(() => { killed = true; try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, HARD_LIMIT_MS);
-    child.on('close', (code) => {
+    let done = false;
+    const finish = (code, error = null) => {
+      if (done) return;
+      done = true;
       clearTimeout(timer);
-      resolve({ code, killed, ms: Date.now() - started, stdout: Buffer.concat(out).toString(), stderr: Buffer.concat(err).toString() });
-    });
+      resolve({ code, killed, ms: Date.now() - started, stdout: Buffer.concat(out).toString(), stderr: Buffer.concat(err).toString() + (error ? `\n${error}` : '') });
+    };
+    // A claude that cannot be started ends the trial at once, not at the hard limit.
+    child.on('error', (e) => finish(null, `claude could not be started: ${e.message}`));
+    child.on('close', (code) => finish(code));
   });
 }
 
