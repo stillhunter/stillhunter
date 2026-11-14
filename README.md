@@ -6,7 +6,7 @@ Still-hunting is a way of hunting: move slowly and quietly, stop, watch, and act
 
 ## Install
 
-You need Claude Code (tested with 2.1.311 and 2.1.325), Node.js 22.22 or later, and Chrome, Edge or Chromium installed. In Claude Code:
+You need Claude Code (tested with 2.1.311 and 2.1.325), Node.js 22.22 or later, and Chrome, Edge or Chromium installed. In a container, run as a user listed in `/etc/passwd`: a probe gets no `HOME`, so Node looks up the home folder there, and a user ID with no entry makes every probe fail with `uv_os_homedir returned ENOENT`. In Claude Code:
 
 ```
 /plugin marketplace add stillhunter/stillhunter

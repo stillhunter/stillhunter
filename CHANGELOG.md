@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2 (2026-11-14)
+
+- A marketplace install now installs only `playwright-core`, about 13 MB, instead of 46 MB with the build tools. The published `package.json` and `npm-shrinkwrap.json` leave out the devDependencies; `scripts/pack.mjs` builds that package, and the release and the benchmark use it.
+- Hunted for real outside Nuxt and macOS: a Vite app with an API, configured with `target.url`, found its planted bug and confirmed it on macOS and on Linux (arm64, Playwright Chromium).
+- The README says that in a container the hunt must run as a user listed in `/etc/passwd`.
+
 ## 0.2.1 (2026-11-14)
 
 - The package now ships `npm-shrinkwrap.json`, so Claude Code installs `playwright-core` when it installs the plugin from the marketplace. 0.2.0 shipped without a lockfile, and an install from the marketplace failed at its first command with `Cannot find module 'playwright-core/lib/utilsBundle'`.

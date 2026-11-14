@@ -77,8 +77,8 @@ export function preparePlugin(parent = process.env.BENCH_WORK ?? tmpdir()) {
   mkdirSync(parent, { recursive: true });
   const dir = mkdtempSync(path.join(parent, 'stillhunter-plugin-'));
   sh('npm', ['run', 'build'], { cwd: REPO });
-  const packed = JSON.parse(sh('npm', ['pack', '--json', '--pack-destination', dir], { cwd: REPO }).stdout)[0];
-  const tarball = path.join(dir, packed.filename);
+  const packed = JSON.parse(sh('node', [path.join(REPO, 'scripts', 'pack.mjs'), dir, '--json'], { cwd: REPO }).stdout);
+  const tarball = packed.path;
   sh('tar', ['-xzf', tarball, '-C', dir]);
   rmSync(tarball);
   const plugin = path.join(dir, 'package');

@@ -50,6 +50,35 @@ test('the package the harness packs holds no benchmark, test or source folder', 
   assert.ok(files.includes('npm-shrinkwrap.json'), files.join(', '));
 });
 
+test('the release tarball holds the same files, with only the runtime dependencies in its package.json and lockfile', () => {
+  // A space in the folder name, as in many Windows profile paths.
+  const dest = mkdtempSync(path.join(tmpdir(), 'sh pack-'));
+  try {
+    const r = spawnSync(process.execPath, [path.join(REPO, 'scripts', 'pack.mjs'), dest, '--json'], { cwd: REPO, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const packed = JSON.parse(r.stdout);
+    const plain = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: REPO, encoding: 'utf8', shell: process.platform === 'win32' });
+    assert.deepEqual(packed.files.map((f) => f.path).sort(), JSON.parse(plain.stdout)[0].files.map((f) => f.path).sort());
+    const out = path.join(dest, 'x');
+    mkdirSync(out);
+    assert.equal(spawnSync('tar', ['-xzf', packed.path, '-C', out]).status, 0);
+    const pkg = JSON.parse(readFileSync(path.join(out, 'package', 'package.json'), 'utf8'));
+    const lock = JSON.parse(readFileSync(path.join(out, 'package', 'npm-shrinkwrap.json'), 'utf8'));
+    const repoPkg = JSON.parse(readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+    assert.equal(pkg.devDependencies, undefined);
+    assert.equal(pkg.scripts, undefined);
+    assert.deepEqual(pkg.dependencies, repoPkg.dependencies);
+    assert.deepEqual(pkg.bin, repoPkg.bin);
+    assert.equal(lock.packages[''].devDependencies, undefined);
+    assert.deepEqual(lock.packages[''].dependencies, repoPkg.dependencies);
+    assert.deepEqual(Object.entries(lock.packages).filter(([, e]) => e.dev).map(([k]) => k), []);
+    for (const name of Object.keys(repoPkg.dependencies)) assert.ok(lock.packages[`node_modules/${name}`], name);
+    assert.ok(!lock.packages['node_modules/typescript']);
+  } finally {
+    rmSync(dest, { recursive: true, force: true });
+  }
+});
+
 test('the published lockfile pins every dependency package.json names, from the registry', () => {
   const pkg = JSON.parse(readFileSync(path.join(REPO, 'package.json'), 'utf8'));
   const lock = JSON.parse(readFileSync(path.join(REPO, 'npm-shrinkwrap.json'), 'utf8'));

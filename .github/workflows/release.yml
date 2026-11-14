@@ -28,9 +28,10 @@ jobs:
           v="${GITHUB_REF_NAME#v}"
           test "$(node -p 'require("./package.json").version')" = "$v"
           test "$(node -p 'require("./.claude-plugin/plugin.json").version')" = "$v"
-      - name: npm pack
+      # The published package.json and lockfile hold only what runs.
+      - name: Pack the runtime package
         run: |
-          npm pack --ignore-scripts
+          node scripts/pack.mjs .
           sha512sum stillhunter-*.tgz | tee tarball.sha512
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -81,6 +82,8 @@ jobs:
           claude plugin install stillhunter@stillhunter
           root=$(ls -d cfg/plugins/cache/stillhunter/stillhunter/*/)
           test -f "$root/node_modules/playwright-core/package.json"
+          # Only the packages the plugin runs on, not the build tools.
+          test ! -e "$root/node_modules/typescript"
           # An unknown command prints the usage to stderr and exits 1.
           if out=$(node "$root/dist/hunt.mjs" bogus 2>&1); then echo 'expected a nonzero exit'; exit 1; fi
           grep -q 'Usage:' <<<"$out"
