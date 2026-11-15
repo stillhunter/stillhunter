@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3 (2026-11-15)
+
+- The README opens with an animated hero, in light and dark versions, that shows a hunt from the change to the kept test. Its three.js source and the script that renders it are in `docs/media/hero/`. The images are not in the npm package.
+- `package.json` names the homepage and the issue tracker.
+
 ## 0.2.2 (2026-11-14)
 
 - A marketplace install now installs only `playwright-core`, about 13 MB, instead of 46 MB with the build tools. The published `package.json` and `npm-shrinkwrap.json` leave out the devDependencies; `scripts/pack.mjs` builds that package, and the release and the benchmark use it.

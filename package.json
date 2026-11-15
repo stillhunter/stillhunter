@@ -1,6 +1,6 @@
 {
   "name": "stillhunter",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Hunts bugs in a web app change the way a careful QA engineer would, and reports only bugs it has made happen twice in a real browser.",
   "license": "MIT",
   "keywords": [
@@ -11,6 +11,10 @@
     "claude-code",
     "claude-code-plugin"
   ],
+  "homepage": "https://github.com/stillhunter/stillhunter#readme",
+  "bugs": {
+    "url": "https://github.com/stillhunter/stillhunter/issues"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stillhunter/stillhunter.git"
