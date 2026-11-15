@@ -2,14 +2,16 @@
 //
 // Scene contract (scene.html in the scene folder):
 //   window.DURATION            loop length in seconds
-//   await window.setup({ width, height, theme })   theme is 'dark' or 'light'
+//   await window.setup({ width, height, theme, scale })   theme is 'dark' or 'light'; scale is the
+//                              device pixel ratio: the layout stays width x height CSS pixels and
+//                              each frame is width*scale x height*scale pixels
 //   await window.renderAt(t)   draws the frame at time t (seconds, 0 <= t < DURATION);
 //                              must be deterministic: no Date.now, no Math.random
 //                              without a seed, no requestAnimationFrame timing.
 // The import map in scene.html can use /node_modules/three/... (served from this folder).
 //
 // Usage:
-//   node render.mjs <sceneDir> --theme dark|light [--fps 24] [--width 1280] [--height 640]
+//   node render.mjs <sceneDir> --theme dark|light [--fps 24] [--width 1280] [--height 640] [--scale 1]
 //                   [--out <dir>] [--at 0,2.5,5] [--sheet sheet.png] [--webp out.webp] [--q 78]
 //   --at renders only those times (seconds) and, with --sheet, tiles them into one image.
 //   Without --at, renders the whole loop; --webp encodes it as a looping animated WebP.
@@ -31,11 +33,13 @@ const theme = opt('theme', 'dark');
 const fps = Number(opt('fps', 24));
 const width = Number(opt('width', 1280));
 const height = Number(opt('height', 640));
+const scale = Number(opt('scale', 1));
 const out = path.resolve(opt('out', path.join(sceneDir, `frames-${theme}`)));
 const at = opt('at');
 const sheet = opt('sheet');
 const webp = opt('webp');
 const q = opt('q', '78');
+const encArgs = (opt('enc', '') || '').split(' ').filter(Boolean); // extra img2webp flags, e.g. --enc "-sharp_yuv -mixed"
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.png': 'image/png', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.svg': 'image/svg+xml' };
 const server = http.createServer((req, res) => {
@@ -51,14 +55,14 @@ await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
 
 const browser = await chromium.launch({ args: ['--use-angle=metal', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-swiftshader'] });
-const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 1 });
+const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: scale });
 const logs = [];
 page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));
 try {
   await page.goto(`http://127.0.0.1:${port}/`);
   await page.waitForFunction(() => typeof window.setup === 'function' && typeof window.renderAt === 'function', null, { timeout: 20000 });
-  await page.evaluate(async (o) => { await window.setup(o); }, { width, height, theme });
+  await page.evaluate(async (o) => { await window.setup(o); }, { width, height, theme, scale });
   await page.evaluate(() => document.fonts?.ready);
   const duration = await page.evaluate(() => window.DURATION);
   const times = at ? at.split(',').map(Number) : Array.from({ length: Math.round(duration * fps) }, (_, i) => i / fps);
@@ -73,7 +77,7 @@ try {
     files.push(file);
   }
   const ms = performance.now() - started;
-  console.log(`rendered ${files.length} frames (${theme}, ${width}x${height}) in ${(ms / 1000).toFixed(1)}s -> ${out}`);
+  console.log(`rendered ${files.length} frames (${theme}, ${Math.round(width * scale)}x${Math.round(height * scale)}) in ${(ms / 1000).toFixed(1)}s -> ${out}`);
   if (sheet && files.length) {
     const cols = Math.min(files.length, Number(opt('cols', 3)));
     const rows = Math.ceil(files.length / cols);
@@ -89,7 +93,7 @@ try {
   }
   if (webp && !at) {
     const frameMs = String(Math.round(1000 / fps));
-    const r = spawnSync('img2webp', ['-loop', '0', '-lossy', '-q', q, '-m', '6', '-d', frameMs, ...files, '-o', path.resolve(webp)], { encoding: 'utf8' });
+    const r = spawnSync('img2webp', ['-loop', '0', '-lossy', '-q', q, '-m', '6', ...encArgs, '-d', frameMs, ...files, '-o', path.resolve(webp)], { encoding: 'utf8' });
     if (r.status !== 0) console.error(r.stderr);
     else console.log(`webp ${path.resolve(webp)} ${(fs.statSync(webp).size / 1048576).toFixed(2)} MB`);
   }

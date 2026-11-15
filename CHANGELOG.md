@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4 (2026-11-15)
+
+- The README hero is sharper: it renders at 1664x832, which matches its 830 px width on a 2x screen, with twice the texture detail in the app's panes and a sharper WebP encoding. The design is unchanged.
+- Fixed a frame in the dark hero, about 1 s in, that flashed almost entirely black. A glass pane seen edge-on produced an infinite value in its shader.
+
 ## 0.2.3 (2026-11-15)
 
 - The README opens with an animated hero, in light and dark versions, that shows a hunt from the change to the kept test. Its three.js source and the script that renders it are in `docs/media/hero/`. The images are not in the npm package.

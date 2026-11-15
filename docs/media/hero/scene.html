@@ -75,6 +75,12 @@ const D = 12;
 window.DURATION = D;
 const TAU = Math.PI * 2;
 const SS = 2; // internal supersampling: glass, lens magnification and text stay crisp
+// Loaded as scene.html?bloomsrc, this page is the hidden 1x bloom source of a K != 1 render (see setup)
+const BLOOM_SRC = new URLSearchParams(location.search).has('bloomsrc');
+// UI textures (pane canvases, kept-test glass) carry TEX times the texels per output pixel of the original 1x asset:
+// the mipmapped text then lands closer to a 4x-supersampled reference (TEX = 1 reproduces the original exactly).
+// The bloom source keeps the original density, so its glow is the approved one.
+const TEX = BLOOM_SRC ? 1 : 2;
 
 // ---------- timing helpers (pure functions of t) ----------
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
@@ -164,6 +170,8 @@ vec3 envLight(vec3 d, float bw, float sk){
   return c;
 }`;
 
+// NaN or Inf, tested on the bits (fast-math shader compilers may fold isnan away)
+const NONFINITE = `bool nonFinite(vec4 v){ return any(greaterThanEqual(floatBitsToUint(v) & 0x7fffffffu, uvec4(0x7f800000u))); }`;
 const fsVS = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
 const copyFS = `precision highp float; varying vec2 vUv; uniform sampler2D tSrc; void main(){ gl_FragColor = texture2D(tSrc, vUv); }`;
 const bgFS = `precision highp float; varying vec2 vUv; uniform vec3 uBg; uniform vec3 uGlow; uniform vec2 uC; uniform vec2 uR; uniform vec3 uG2; uniform vec3 uG3;
@@ -173,13 +181,13 @@ void main(){ vec2 p = (vUv - uC) / uR; float g = cg(p, 1.6); vec3 c = mix(uBg, u
   vec2 a = (vUv - vec2(0.80, 0.70)) / vec2(0.12, 0.2); c += uG2 * cg(a, 1.4);
   vec2 b = (vUv - vec2(0.62, 0.26)) / vec2(0.15, 0.2); c += uG3 * cg(b, 1.4);
   gl_FragColor = vec4(c, 1.0); }`;
-const finalFS = `precision highp float; varying vec2 vUv; uniform sampler2D tSrc; uniform vec3 uBg; uniform vec2 uRes;
+const finalFS = `precision highp float; varying vec2 vUv; uniform sampler2D tSrc; uniform vec3 uBg; uniform vec2 uRes; uniform float uK;
 uniform float uBlip; uniform vec4 uBlipBox; uniform float uShock; uniform vec2 uShockC; uniform vec2 uFade;
 void main(){ vec2 px = vUv * uRes; vec3 c;
   if (uShock > 0.001) {
-    // the lock lands: a small chromatic split around the reticle only (at most 3 px, gone within ~150 px)
-    vec2 dp = px - uShockC * uRes; float dl = length(dp);
-    float k = uShock * 3.0 * exp(-dl * dl / (150.0 * 150.0)) * smoothstep(0.0, 40.0, dl);
+    // the lock lands: a small chromatic split around the reticle only (at most 3 px, gone within ~150 px; CSS px, so dl is measured in px / uK)
+    vec2 dp = (px - uShockC * uRes) / uK; float dl = length(dp);
+    float k = uShock * 3.0 * uK * exp(-dl * dl / (150.0 * 150.0)) * smoothstep(0.0, 40.0, dl);
     vec2 dv = dp / max(dl, 1.0) * k / uRes;
     c = vec3(texture2D(tSrc, vUv + dv).r, texture2D(tSrc, vUv).g, texture2D(tSrc, vUv - dv).b);
   } else c = texture2D(tSrc, vUv).rgb;
@@ -236,9 +244,13 @@ uniform vec3 uWallCol; uniform vec3 uWallCol2; uniform float uWallA; uniform vec
 uniform vec4 uPL[3]; uniform vec3 uPLC[3]; uniform float uPLA; uniform float uDotLit; uniform vec3 uDotCol;
 uniform vec4 uCrk[32]; uniform vec2 uCrkP[32]; uniform float uCrkA; uniform vec2 uCrkO; uniform float uCrkBead; uniform vec3 uCrkHot;
 uniform vec4 uRip; uniform float uRipW; uniform float uSweepF; uniform float uLayer; uniform float uOverA; uniform float uInkA;
+uniform float uK; uniform float uLodK;
 ${ENV}
+${NONFINITE}
 float sdRR(vec2 p, vec2 b, float r){ vec2 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }
 vec3 frost(vec2 uv, float lod){
+  // uLodK = log2(K): the same blur in CSS px at any output scale
+  lod += uLodK;
   vec2 px = 1.0 / uRes; float rad = exp2(lod) * 0.85;
   vec3 acc = textureLod(tBehind, uv, lod).rgb * 2.0;
   for (int i = 0; i < 8; i++) {
@@ -361,7 +373,8 @@ void main(){
     c *= cap * uContentA;
     if (uDotLit > 0.0) {
       // edge-lit sheet: light carried in from the rim makes the engraved dots glow, brightest near the edge
-      float prox = exp(sd / 0.42) + 0.5 * exp(sd / 1.3);
+      // sd never exceeds the bevel on the slab; the clamp only keeps a stray fragment (below) from overflowing to Inf
+      float prox = exp(min(sd, 1.0) / 0.42) + 0.5 * exp(min(sd, 1.0) / 1.3);
       float lit = uDotLit * (0.1 + prox);
       c = vec4(uDotCol * c.a * lit, c.a * clamp(lit * (uDark > 0.5 ? 0.25 : 0.7), 0.0, 1.0));
     }
@@ -398,9 +411,11 @@ void main(){
   }
   if (uInkA > 0.0) {
     // where the face meets the bevel: a one pixel darker line, and just inside it a thin cool refraction edge
+    // widths and offsets keep their CSS size (x uK); the edges stay one device pixel soft, so they get crisper with K
     float lw = max(fwidth(sd), 1e-5); float fk = smoothstep(0.6, 0.95, facing);
-    float il = 1.0 - smoothstep(0.5 * lw, 1.4 * lw, abs(sd + uBev - 0.9 * lw));
-    float cl = 1.0 - smoothstep(0.5 * lw, 1.6 * lw, abs(sd + uBev + 1.6 * lw));
+    float wk = lw * (uK - 1.0);
+    float il = 1.0 - smoothstep(0.5 * lw + 0.95 * wk, 1.4 * lw + 0.95 * wk, abs(sd + uBev - 0.9 * lw * uK));
+    float cl = 1.0 - smoothstep(0.5 * lw + 1.05 * wk, 1.6 * lw + 1.05 * wk, abs(sd + uBev + 1.6 * lw * uK));
     col *= 1.0 - uInkA * il * fk;
     col = mix(col, vec3(0.42, 0.66, 1.0), 0.5 * uInkA * cl * fk);
   }
@@ -468,7 +483,14 @@ void main(){
     if (uDark > 0.5 || uSweepF < 0.5) col += (uDark > 0.5 ? vec3(0.55, 0.65, 0.85) : vec3(0.35)) * b * (uSweepF + 1.4 * edge);
     else col = mix(col, vec3(1.0), clamp(b * (uSweepF * 0.5 + edge), 0.0, 0.85));
   }
-  gl_FragColor = vec4(mix(base0.rgb, col, uOpacity), uOrtho > 0.5 ? 1.0 : base0.a + step(0.5, uOpacity));
+  vec4 outC = vec4(mix(base0.rgb, col, uOpacity), uOrtho > 0.5 ? 1.0 : base0.a + step(0.5, uOpacity));
+  // A slab triangle seen exactly edge-on can still cover a pixel centre, with its varyings extrapolated far outside
+  // the slab (the dot light then overflowed: one NaN pixel, which the frost, DOF and bloom spread into a blotch or
+  // a black frame). A fragment more than half a slab outside the slab has no area to show: it keeps what is behind
+  // it. (Silhouette fragments extrapolate a little; they are well inside this bound and render as before.)
+  // No other NaN or Inf gets out either.
+  bool stray = any(greaterThan(abs(vLP.xy), uSize));
+  gl_FragColor = stray || nonFinite(outC) ? base0 : outC;
 }`;
 
 const shadowVS = `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
@@ -566,7 +588,7 @@ void main(){
 const lensFS = `precision highp float;
 uniform sampler2D tBehind; uniform vec2 uRes; uniform vec2 uC; uniform float uR; uniform float uMag; uniform float uBarrel;
 uniform vec3 uRingCol; uniform float uRingA; uniform float uSpin; uniform float uLock; uniform float uA; uniform mat3 uCamRot;
-uniform vec3 uRimCol; uniform float uRimA; uniform float uBreath;
+uniform vec3 uRimCol; uniform float uRimA; uniform float uBreath; uniform float uK;
 ${ENV}
 void main(){
   vec2 fc = gl_FragCoord.xy; vec2 d = (fc - uC) / uR; float r = length(d);
@@ -598,18 +620,20 @@ void main(){
   float cres = smoothstep(0.64, 0.76, r) * (1.0 - smoothstep(0.83, 0.88, r)) * smoothstep(0.3, 1.0, cos(ga - 2.25));
   float glint = exp(-pow(length((d - vec2(-0.38, 0.47)) * vec2(1.0, 1.6)) / 0.075, 2.0));
   col += (uDark > 0.5 ? vec3(0.82, 0.9, 1.0) * 0.5 : vec3(1.0) * 0.55) * cres + vec3(1.0) * (uDark > 0.5 ? 0.42 : 0.5) * glint;
+  // the etched lines are pixel-sized: their width scales with K (CSS size), their soft edge stays one pixel
+  float wk = uK - 1.0;
   float ringR = mix(0.80, 0.70, uLock);
-  float ring = 1.0 - smoothstep(0.6, 1.7, abs(r - ringR) * uR);
+  float ring = 1.0 - smoothstep(0.6 + 1.15 * wk, 1.7 + 1.15 * wk, abs(r - ringR) * uR);
   float ang = atan(d.y, d.x) - uSpin;
   float q = mod(ang + 0.78539816, 1.5707963) - 0.78539816;
   float perp = abs(sin(q)) * r * uR;
   float t0 = ringR + 0.05, t1 = ringR + mix(0.12 + 0.05 * uBreath, 0.20, uLock);
-  float tick = (1.0 - smoothstep(0.9, 2.1, perp)) * smoothstep(t0 - 0.012, t0, r) * (1.0 - smoothstep(t1, t1 + 0.012, r)) * step(0.0, cos(q));
+  float tick = (1.0 - smoothstep(0.9 + 1.5 * wk, 2.1 + 1.5 * wk, perp)) * smoothstep(t0 - 0.012, t0, r) * (1.0 - smoothstep(t1, t1 + 0.012, r)) * step(0.0, cos(q));
   float etch = clamp(ring * 0.75 + tick * 0.9, 0.0, 1.0) * uRingA;
   col = mix(col, uRingCol, etch);
-  float rl = 1.0 - smoothstep(0.5, 1.8, abs(r - 0.99) * uR);
+  float rl = 1.0 - smoothstep(0.5 + 1.15 * wk, 1.8 + 1.15 * wk, abs(r - 0.99) * uR);
   col = mix(col, uRimCol, rl * uRimA);
-  float il = 1.0 - smoothstep(0.4, 2.2, abs(r - 0.855) * uR);
+  float il = 1.0 - smoothstep(0.4 + 1.3 * wk, 2.2 + 1.3 * wk, abs(r - 0.855) * uR);
   col *= 1.0 - 0.4 * il;
   vec3 base = texture(tBehind, fc / uRes).rgb;
   gl_FragColor = vec4(mix(base, col, mask * uA), 1.0);
@@ -619,7 +643,8 @@ const depthVS = `varying float vZ; void main(){ vec4 mv = modelViewMatrix * vec4
 const depthFS = `precision highp float; varying float vZ; void main(){ gl_FragColor = vec4(vZ, 0.0, 0.0, 1.0); }`;
 
 // ---------- UI content (2D canvas, high resolution) ----------
-const PX = 320; // canvas pixels per world unit
+const PX = 320; // design units per world unit: the draw functions below are laid out in these
+let PXS = 1; // texture texels per design unit: K * TEX, set in setup
 const FONT = 'system-ui,-apple-system,"Helvetica Neue",sans-serif';
 const MONO = 'ui-monospace,"SF Mono",Menlo,monospace';
 function rr(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
@@ -788,7 +813,7 @@ function drawApi(ctx, w, h, s) {
   ctx.textBaseline = 'alphabetic';
 }
 function drawKeptChip(ctx, w, h) {
-  // the confirmed finding, kept as a test (canvas is 4x the chip's output size)
+  // the confirmed finding, kept as a test (the canvas is 4 * K * TEX texels per CSS px of the chip)
   ctx.clearRect(0, 0, w, h);
   const k = w / 196, cy = h / 2;
   ctx.beginPath(); ctx.arc(23 * k, cy, 12 * k, 0, TAU);
@@ -835,8 +860,10 @@ function slabGeometry(w, h, d, r, bevel, segs = 6) {
 }
 
 // ---------- renderer state ----------
-let renderer, cam, W = 1280, H = 640, RW, RH;
-let rtA, rtB, rtZ, rtD, rtF, rtO, rtAcc, bloom;
+// W x H: the layout in CSS px (fixed). K: device pixels per CSS px of the output (setup's scale).
+// OW x OH: output pixels. RW x RH: the supersampled working buffers. S = RW px per CSS px (SS * K).
+let renderer, cam, W = 1280, H = 640, RW, RH, K = 1, OW = 1280, OH = 640, S = SS;
+let rtA, rtB, rtZ, rtD, rtF, rtO, rtAcc, bloom, glowSrc = null, glowTex = null;
 let fsGeo, fsCam, P = {};
 let depthMat, arcScene, lensShadowScene, lensScene, hudScene, hudCam;
 const panes = {};
@@ -876,6 +903,7 @@ function glassMat(o) {
       uCrkA: { value: 0 }, uCrkO: { value: new THREE.Vector2() }, uCrkBead: { value: 0 }, uCrkHot: { value: c3(T.red) },
       uRip: { value: new THREE.Vector4(0, 0, 0, 0) }, uRipW: { value: 1 }, uSweepF: { value: o.sweepF ?? 0.35 },
       uOverA: { value: o.overA ?? 1 }, uInkA: { value: o.inkA ?? G.inkA },
+      uK: { value: K }, uLodK: { value: Math.log2(K) },
     },
   });
 }
@@ -890,8 +918,10 @@ function shadowMesh(w, h, rad) {
 function makePane(name, o) {
   const canvas = o.draw ? document.createElement('canvas') : null;
   let tex = null;
+  // the draw functions always lay out in design units (dw x dh); the canvas is that times PXS
+  const dw = Math.round(o.w * PX), dh = Math.round(o.h * PX);
   if (canvas) {
-    canvas.width = Math.round(o.w * PX); canvas.height = Math.round(o.h * PX);
+    canvas.width = Math.round(dw * PXS); canvas.height = Math.round(dh * PXS);
     tex = new THREE.CanvasTexture(canvas); tex.premultiplyAlpha = true; tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
     tex.minFilter = THREE.LinearMipmapLinearFilter; tex.generateMipmaps = true;
   }
@@ -905,14 +935,19 @@ function makePane(name, o) {
   const scene = new THREE.Scene(); scene.add(group);
   let shScene = null, sh2Scene = null;
   if (sh) { shScene = new THREE.Scene(); shScene.add(sh); sh2Scene = new THREE.Scene(); sh2Scene.add(sh2); sh2.material.uniforms.uCol.value.copy(c3(T.shadow)); }
-  const p = { name, scene, shScene, sh2Scene, group, slab, sh, sh2, mat, canvas, tex, ctx: canvas?.getContext('2d'), w: o.w, h: o.h, d: o.d, flat: o.flat, ex: o.ex, draw: o.draw, key: '' };
+  const p = { name, scene, shScene, sh2Scene, group, slab, sh, sh2, mat, canvas, tex, ctx: canvas?.getContext('2d'), w: o.w, h: o.h, d: o.d, flat: o.flat, ex: o.ex, draw: o.draw, key: '',
+    dw, dh, sx: canvas ? canvas.width / dw : 1, sy: canvas ? canvas.height / dh : 1 };
   panes[name] = p;
   return p;
+}
+function paint(p, state) {
+  p.ctx.setTransform(p.sx, 0, 0, p.sy, 0, 0);
+  p.draw(p.ctx, p.dw, p.dh, state); p.tex.needsUpdate = true;
 }
 function redraw(p, state) {
   const key = JSON.stringify(state);
   if (key === p.key) return;
-  p.key = key; p.draw(p.ctx, p.canvas.width, p.canvas.height, state); p.tex.needsUpdate = true;
+  p.key = key; paint(p, state);
 }
 
 const arcs = {};
@@ -952,12 +987,15 @@ const proj = (v) => { const p = v.clone().project(cam); return [(p.x * 0.5 + 0.5
 
 // ---------- setup ----------
 let lensMat, lensShadowMat, tray, keptChip, chipScene;
-window.setup = async ({ width, height, theme }) => {
-  W = width; H = height; RW = W * SS; RH = H * SS;
+window.setup = async ({ width, height, theme, scale = 1 }) => {
+  // the layout stays width x height CSS px at any scale; buffers, pixel-sized effects and the UI textures scale with K
+  W = width; H = height; K = scale > 0 ? scale : 1; OW = Math.round(W * K); OH = Math.round(H * K);
+  S = SS * K; RW = OW * SS; RH = OH * SS; PXS = K * TEX;
   T = THEMES[theme] || THEMES.dark; U = T.ui; G = T.glass;
   document.documentElement.dataset.theme = T.name;
   renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(1); renderer.setSize(W, H);
+  renderer.setPixelRatio(1); renderer.setSize(OW, OH, false);
+  renderer.domElement.style.width = `${W}px`; renderer.domElement.style.height = `${H}px`;
   renderer.outputColorSpace = THREE.LinearSRGBColorSpace; renderer.toneMapping = THREE.NoToneMapping; renderer.autoClear = false;
   document.body.insertBefore(renderer.domElement, ui);
 
@@ -967,8 +1005,8 @@ window.setup = async ({ width, height, theme }) => {
   rtZ = new THREE.WebGLRenderTarget(RW / 2, RH / 2, { ...base, depthBuffer: true });
   rtD = new THREE.WebGLRenderTarget(RW, RH, base);
   rtF = new THREE.WebGLRenderTarget(RW, RH, { ...base, samples: 4 });
-  rtO = new THREE.WebGLRenderTarget(W, H, base);
-  rtAcc = new THREE.WebGLRenderTarget(W, H, base);
+  rtO = new THREE.WebGLRenderTarget(OW, OH, base);
+  rtAcc = new THREE.WebGLRenderTarget(OW, OH, base);
 
   fsGeo = new THREE.BufferGeometry();
   fsGeo.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
@@ -978,13 +1016,32 @@ window.setup = async ({ width, height, theme }) => {
   P.copy = fsPass(copyFS, { tSrc: { value: null } });
   P.bg = fsPass(bgFS, { uBg: { value: bgv }, uGlow: { value: c3(T.glow) }, uG2: { value: c3(T.g2) }, uG3: { value: c3(T.g3) }, uC: { value: new THREE.Vector2(...T.glowC) }, uR: { value: new THREE.Vector2(...T.glowR) } });
   P.dof = fsPass(dofFS, { tCol: { value: rtA.texture }, tZ: { value: rtZ.texture }, uRes: { value: new THREE.Vector2(RW, RH) }, uFocus: { value: 15 }, uScale: { value: 0 }, uMaxR: { value: 0 } });
-  P.final = fsPass(finalFS, { tSrc: { value: rtAcc.texture }, uBg: { value: bgv }, uRes: { value: new THREE.Vector2(W, H) }, uBlip: { value: 0 }, uBlipBox: { value: new THREE.Vector4(440, 16, 1264, 624) },
-    uShock: { value: 0 }, uShockC: { value: new THREE.Vector2(0.5, 0.5) }, uFade: { value: new THREE.Vector2(...(T.dark ? [5, 60] : [6, 92])) } });
+  // the refresh box is the scene area in CSS px, widened to whole 8x8 encoder blocks of the output (the blocks stay 8 output px)
+  const box = [Math.floor(440 * K / 8) * 8, Math.floor(16 * K / 8) * 8, Math.ceil(1264 * K / 8) * 8, Math.ceil(624 * K / 8) * 8];
+  P.final = fsPass(finalFS, { tSrc: { value: rtAcc.texture }, uBg: { value: bgv }, uRes: { value: new THREE.Vector2(OW, OH) }, uK: { value: K }, uBlip: { value: 0 }, uBlipBox: { value: new THREE.Vector4(...box) },
+    uShock: { value: 0 }, uShockC: { value: new THREE.Vector2(0.5, 0.5) }, uFade: { value: new THREE.Vector2(...(T.dark ? [5, 60] : [6, 92]).map((v) => v * K)) } });
   P.grade = fsPass(gradeFS, { tSrc: { value: rtD.texture }, uBg: { value: bgv }, uDim: { value: 0 }, uC: { value: new THREE.Vector2() }, uR: { value: new THREE.Vector2(1, 1) }, uRes: { value: new THREE.Vector2(RW, RH) } });
-  P.acc = fsPass(`precision highp float; varying vec2 vUv; uniform sampler2D tSrc; uniform float uW; void main(){ gl_FragColor = texture2D(tSrc, vUv) * uW; }`,
+  // backstop: an exposure pixel that is not finite is dropped, so it cannot poison the frame and the bloom
+  P.acc = fsPass(`precision highp float; varying vec2 vUv; uniform sampler2D tSrc; uniform float uW; ${NONFINITE}
+    void main(){ vec4 s = texture2D(tSrc, vUv); gl_FragColor = nonFinite(s) ? vec4(0.0) : s * uW; }`,
     { tSrc: { value: null }, uW: { value: 1 / NS } }, THREE.CustomBlending);
   P.acc.mat.blendSrc = THREE.OneFactor; P.acc.mat.blendDst = THREE.OneFactor; P.acc.mat.blendSrcAlpha = THREE.OneFactor; P.acc.mat.blendDstAlpha = THREE.OneFactor;
   if (T.bloom) bloom = new UnrealBloomPass(new THREE.Vector2(W, H), T.bloom[0], T.bloom[1], T.bloom[2]);
+  if (T.bloom && K !== 1) {
+    // The bloom's bright pass is a near-hard threshold (luminance 1.0), so whether a thin HDR highlight blooms
+    // depends on exactly how the 1x frame samples it; no resample of this frame gives the same glow. A hidden copy
+    // of this scene renders each frame at K = 1 and hands over its glow (W/2 x H/2, the pass's own composite),
+    // which is then added at full size: the glow is the approved one at any K.
+    const f = document.createElement('iframe');
+    f.style.cssText = `position:absolute;left:0;top:0;width:${W}px;height:${H}px;border:0;visibility:hidden;pointer-events:none`;
+    await new Promise((res, rej) => { f.onload = res; f.onerror = rej; f.src = `${location.pathname}?bloomsrc`; document.body.appendChild(f); });
+    glowSrc = f.contentWindow;
+    for (let i = 0; i < 400 && typeof glowSrc.bloomGlow !== 'function'; i++) await new Promise((r) => setTimeout(r, 50));
+    await glowSrc.setup({ width, height, theme: T.name, scale: 1 });
+    const g = bloom.renderTargetsHorizontal[0];
+    glowTex = new THREE.DataTexture(new Uint16Array(g.width * g.height * 4), g.width, g.height, THREE.RGBAFormat, THREE.HalfFloatType);
+    glowTex.minFilter = glowTex.magFilter = THREE.LinearFilter; glowTex.generateMipmaps = false;
+  }
   depthMat = new THREE.ShaderMaterial({ vertexShader: depthVS, fragmentShader: depthFS, depthTest: true, depthWrite: true, side: THREE.DoubleSide });
 
   cam = new THREE.PerspectiveCamera(26, W / H, 0.1, 200);
@@ -999,8 +1056,7 @@ window.setup = async ({ width, height, theme }) => {
   makePane('list', { w: 2.95, h: 3.42, d: 0.24, r: 0.22, bevel: 0.09, draw: drawList, flat: V(1.62, -0.31, 0.18), ex: V(2.3, -0.4, -1.0) });
   makePane('form', { w: 2.95, h: 2.2, d: 0.24, r: 0.22, bevel: 0.09, draw: drawForm, flat: V(-1.62, 0.42, 0.18), ex: V(-2.15, 0.55, 0.95) });
   makePane('totals', { w: 2.95, h: 1.12, d: 0.24, r: 0.22, bevel: 0.09, draw: drawTotals, flat: V(-1.62, -1.45, 0.18), ex: V(-1.55, -1.38, 2.1) });
-  drawBack(panes.back.ctx, panes.back.canvas.width, panes.back.canvas.height); panes.back.tex.needsUpdate = true;
-  drawTopbar(panes.topbar.ctx, panes.topbar.canvas.width, panes.topbar.canvas.height); panes.topbar.tex.needsUpdate = true;
+  paint(panes.back); paint(panes.topbar);
 
   arcScene = new THREE.Scene();
   ['list', 'totals', 'form'].forEach(makeArc);
@@ -1015,24 +1071,25 @@ window.setup = async ({ width, height, theme }) => {
   lensMat = new THREE.ShaderMaterial({ vertexShader: quadVS, fragmentShader: lensFS, depthTest: false, depthWrite: false, blending: THREE.NoBlending,
     uniforms: { tBehind: { value: rtB.texture }, uRes: { value: new THREE.Vector2(RW, RH) }, uC: { value: new THREE.Vector2() }, uR: { value: 100 }, uPad: { value: 1.03 },
       uMag: { value: 1.5 }, uBarrel: { value: 0.36 }, uBreath: { value: 0 }, uRingCol: { value: c3(T.huntHot) }, uRingA: { value: 1 }, uSpin: { value: 0 }, uLock: { value: 0 }, uA: { value: 1 },
-      uCamRot: { value: new THREE.Matrix3() }, uRimCol: { value: c3(T.lensRim) }, uRimA: { value: T.lensRimA }, uDark: { value: T.dark }, uStripA: { value: 0.25 } } });
+      uCamRot: { value: new THREE.Matrix3() }, uRimCol: { value: c3(T.lensRim) }, uRimA: { value: T.lensRimA }, uDark: { value: T.dark }, uStripA: { value: 0.25 }, uK: { value: K } } });
   lensScene = new THREE.Scene(); { const m = new THREE.Mesh(quadGeo, lensMat); m.frustumCulled = false; lensScene.add(m); }
 
   // kept tests: a glass tray and the chip that lands in it, in screen space
   hudScene = new THREE.Scene();
   hudCam = new THREE.OrthographicCamera(0, RW, RH, 0, -1000, 1000); hudCam.position.z = 100; hudCam.updateMatrixWorld();
+  // HUD units are working-buffer px: S per CSS px
   const mkGlass = (wo, ho, depth, rad, bev, draw, o = {}) => {
-    const CW = wo * SS, CH = ho * SS;
-    const c = document.createElement('canvas'); c.width = wo * 4; c.height = ho * 4;
+    const CW = wo * S, CH = ho * S;
+    const c = document.createElement('canvas'); c.width = Math.round(wo * 4 * K * TEX); c.height = Math.round(ho * 4 * K * TEX);
     const tex = new THREE.CanvasTexture(c); tex.premultiplyAlpha = true; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.anisotropy = 8;
     const ctx = c.getContext('2d'); draw(ctx, c.width, c.height); tex.needsUpdate = true;
-    const mat = glassMat({ w: CW, h: CH, tex, ortho: true, frost: o.frost ?? 2.6, refr: 0.05, tintA: G.tintA + (o.tint ?? 0.18), r: rad * SS, bevel: bev * SS, d: depth * SS,
-      lensE: 0.012, band: 7 * SS, shift: 0, plA: 0, wallA: 0 });
+    const mat = glassMat({ w: CW, h: CH, tex, ortho: true, frost: o.frost ?? 2.6, refr: 0.05, tintA: G.tintA + (o.tint ?? 0.18), r: rad * S, bevel: bev * S, d: depth * S,
+      lensE: 0.012, band: 7 * S, shift: 0, plA: 0, wallA: 0 });
     mat.uniforms.uTint.value.copy(c3(G.tint)); mat.uniforms.uTint2.value.copy(c3(G.tint2));
     mat.transparent = true; // shares the transparent list with its shadow so draw order holds
-    const m = new THREE.Mesh(slabGeometry(CW, CH, depth * SS, rad * SS, bev * SS, 5), mat); m.frustumCulled = false; m.renderOrder = 1;
-    const sh = shadowMesh(CW, CH, rad * SS); sh.material.uniforms.uBlur.value = 7 * SS;
-    sh.scale.set((CW + 70) / (CW + 3.2), (CH + 70) / (CH + 3.2), 1); sh.material.uniforms.uQuad.value.set(CW + 70, CH + 70);
+    const m = new THREE.Mesh(slabGeometry(CW, CH, depth * S, rad * S, bev * S, 5), mat); m.frustumCulled = false; m.renderOrder = 1;
+    const sh = shadowMesh(CW, CH, rad * S); sh.material.uniforms.uBlur.value = 7 * S;
+    sh.scale.set((CW + 70 * K) / (CW + 3.2), (CH + 70 * K) / (CH + 3.2), 1); sh.material.uniforms.uQuad.value.set(CW + 70 * K, CH + 70 * K);
     sh.renderOrder = 0; sh.frustumCulled = false;
     const g = new THREE.Group(); g.add(sh, m); hudScene.add(g);
     return { g, m, sh, mat, ctx, tex, canvas: c, wo, ho };
@@ -1042,8 +1099,8 @@ window.setup = async ({ width, height, theme }) => {
   keptChip.mat.uniforms.uGlowCol.value.copy(c3(T.green)); tray.mat.uniforms.uGlowCol.value.copy(c3(T.green));
   // the chip flies in front of the lens, so it lives in its own scene drawn last
   hudScene.remove(keptChip.g); chipScene = new THREE.Scene(); chipScene.add(keptChip.g);
-  keptChip.mat.uniforms.uSweepF.value = 1.1; keptChip.mat.uniforms.uSweepDir.value.set(0.8 / 40, 0.6 / 40);
-  tray.mat.uniforms.uRipW.value = 9 * SS;
+  keptChip.mat.uniforms.uSweepF.value = 1.1; keptChip.mat.uniforms.uSweepDir.value.set(0.8 / (40 * K), 0.6 / (40 * K));
+  tray.mat.uniforms.uRipW.value = 9 * S;
 
   // overlay
   const brand = document.createElement('div'); brand.className = 'brand';
@@ -1383,10 +1440,10 @@ function renderSample(t, tf) {
   const toCam = cam.position.clone().sub(lensP).normalize();
   const hover = lensP.clone().addScaledVector(toCam, L0.h);
   const [lx, ly] = proj(lensP);
-  const lensR = 68 * SS * lerp(0.76, 1.0, ex);
+  const lensR = 68 * S * lerp(0.76, 1.0, ex);
   const lock = expoOut((t - LOCK1) / 0.4) * (1 - rampS(t, B.keep - 0.05, B.keep + 0.45));
   const click2 = win(t, LOCK2, LOCK2 + 0.04, LOCK2 + 0.08, LOCK2 + 0.3);
-  const lensC = new THREE.Vector2(lx * SS, RH - ly * SS);
+  const lensC = new THREE.Vector2(lx * S, RH - ly * S);
   const lensRL = lensR * (1 + 0.05 * lock + 0.05 * click2);
   lensShadowMat.uniforms.uC.value.copy(lensC); lensShadowMat.uniforms.uR.value = lensRL * 0.96;
   lensShadowMat.uniforms.uOff.value.set((0.44 + 0.34 * L0.h) * lensR, -(0.6 + 0.46 * L0.h) * lensR);
@@ -1431,10 +1488,11 @@ function renderSample(t, tf) {
   // ---- depth of field, focused where the hunter looks ----
   const focusD = lensP.clone().sub(cam.position).dot(cam.getWorldDirection(new THREE.Vector3()));
   const dofAmt = ex;
-  P.dof.u.uFocus.value = focusD; P.dof.u.uScale.value = (300 + 260 * lean) * dofAmt; P.dof.u.uMaxR.value = 1 + (2.4 + 2.6 * lean) * dofAmt;
+  // circle of confusion in working-buffer px: x K keeps the same blur in CSS px
+  P.dof.u.uFocus.value = focusD; P.dof.u.uScale.value = (300 + 260 * lean) * dofAmt * K; P.dof.u.uMaxR.value = (1 + (2.4 + 2.6 * lean) * dofAmt) * K;
   if (dofAmt > 0.02) P.dof.run(rtD); else copyTo(rtA, rtD);
 
-  lensScr.x = lx; lensScr.y = ly; lensScr.R = lensRL / SS;
+  lensScr.x = lx; lensScr.y = ly; lensScr.R = lensRL / S;
   { const [cx, cy] = proj(panes.totals.group.position.clone().add(V(CRACK_O[0], CRACK_O[1], panes.totals.d / 2))); chipScr.x = cx; chipScr.y = cy; }
   // ---- grade: while the bug is confirmed the rest of the scene steps back, so its red light dominates ----
   const dim = 0.3 * win(t, LOCK1 - 0.1, LOCK1 + 0.15, B.keep - 0.05, B.keep + 0.35);
@@ -1450,7 +1508,7 @@ function renderSample(t, tf) {
   if (keptChip.g.visible) { copyTo(rtF, rtB); renderer.setRenderTarget(rtF); renderer.render(chipScene, hudCam); }
 
   copyTo(rtF, rtO);
-  return { frame, lx, ly, lensR: lensRL / SS, lock, shock, ex };
+  return { frame, lx, ly, lensR: lensRL / S, lock, shock, ex };
 }
 
 // motion blur: a 162 degree shutter (0.45 frame) ending at t, NS exposures averaged
@@ -1461,15 +1519,35 @@ const NS = 16, SHUTTER = 0.45 / 24;
 // on the next frame), which makes the encoder re-send the scene area and clears the drift.
 // The nudge (one grey pixel per block) is far below the quantiser step and does not show.
 const REFRESH = 4;
-window.renderAt = async (t) => {
-  t = ((t % D) + D) % D;
+function accumulate(t) {
   let info;
   for (let i = 0; i < NS; i++) {
     info = renderSample(t - SHUTTER * (NS - 1 - i) / (NS - 1), t);
     if (i === 0) { renderer.setRenderTarget(rtAcc); renderer.setClearColor(0x000000, 0); renderer.clear(true, false, false); }
     P.acc.u.tSrc.value = rtO.texture; P.acc.u.uW.value = 1 / NS; P.acc.run(rtAcc);
   }
-  if (bloom) bloom.render(renderer, null, rtAcc, 0, false);
+  return info;
+}
+// the bloom source's half of the bargain: the glow of the 1x frame at t (half-float RGBA, W/2 x H/2, rows bottom up)
+window.bloomGlow = async (t) => {
+  t = ((t % D) + D) % D;
+  accumulate(t);
+  bloom.render(renderer, null, rtAcc, 0, false);
+  const g = bloom.renderTargetsHorizontal[0], buf = new Uint16Array(g.width * g.height * 4);
+  renderer.readRenderTargetPixels(g, 0, 0, g.width, g.height, buf);
+  return buf;
+};
+window.renderAt = async (t) => {
+  t = ((t % D) + D) % D;
+  const info = accumulate(t);
+  if (bloom && K === 1) bloom.render(renderer, null, rtAcc, 0, false);
+  else if (bloom) {
+    // the 1x render's glow (see setup), added onto the full-size frame with the pass's own blend
+    glowTex.image.data.set(await glowSrc.bloomGlow(t)); glowTex.needsUpdate = true;
+    bloom.copyUniforms.tDiffuse.value = glowTex;
+    bloom._fsQuad.material = bloom.blendMaterial;
+    renderer.setRenderTarget(rtAcc); bloom._fsQuad.render(renderer);
+  }
   P.final.u.uBlip.value = info.frame % REFRESH === 0 ? 1 : 0;
   P.final.u.uShock.value = info.shock; P.final.u.uShockC.value.set(info.lx / W, 1 - info.ly / H);
   P.final.run(null);
@@ -1479,9 +1557,9 @@ window.renderAt = async (t) => {
 // kept tests: the tray shows up when there is something to keep; the finding lands in it
 const hudShow = (t) => rampS(t, B.keep - 0.1, B.keep + 0.25) * (1 - rampS(t, OUT[0], OUT[1]));
 function setGlass(c, x, y, scale, op) {
-  // x, y: output px of the top-left; to SS px with y up
-  const CW = c.wo * SS, CH = c.ho * SS;
-  c.g.position.set(x * SS + CW / 2 * scale, RH - (y * SS + CH / 2 * scale), 0);
+  // x, y: CSS px of the top-left; to working-buffer px (S per CSS px) with y up
+  const CW = c.wo * S, CH = c.ho * S;
+  c.g.position.set(x * S + CW / 2 * scale, RH - (y * S + CH / 2 * scale), 0);
   c.g.scale.setScalar(scale);
   c.mat.uniforms.uOpacity.value = op; c.sh.material.uniforms.uA.value = (T.dark ? 0.55 : 0.2) * op;
   c.g.visible = op > 0.002;
@@ -1509,16 +1587,16 @@ function updateHud(t, tf) {
   keptChip.mat.uniforms.uFaceN.value.set(0, 0, 1).applyEuler(keptChip.m.rotation);
   keptChip.g.renderOrder = 20;
   // its shadow falls further and softer while it is lifted
-  keptChip.sh.position.set(16 * SS * lift, -24 * SS * lift, 0);
-  keptChip.sh.material.uniforms.uBlur.value = 7 * SS * (1 + 1.8 * lift);
+  keptChip.sh.position.set(16 * S * lift, -24 * S * lift, 0);
+  keptChip.sh.material.uniforms.uBlur.value = 7 * S * (1 + 1.8 * lift);
   keptChip.sh.material.uniforms.uA.value *= 1 - 0.45 * lift;
   // the strip light runs across its face at the top of the arc
-  { const u = keptChip.mat.uniforms, g = keptChip.g.position; const s0 = (g.x * 0.8 + g.y * 0.6) / 40;
+  { const u = keptChip.mat.uniforms, g = keptChip.g.position; const s0 = (g.x * 0.8 + g.y * 0.6) / (40 * K);
     u.uSweep.value = s0 + lerp(-6, 6, ramp(k, 0.12, 0.66)); u.uSweepA.value = win(k, 0.1, 0.22, 0.56, 0.7) * (T.dark ? 0.55 : 0.7); }
   // landing: a green ripple runs out through the tray's glass from the slot, and the chip glows once
   const since = t - B.land;
   const rip = since >= 0 && since < 0.7 ? Math.exp(-since / 0.22) * ramp(since, 0, 0.04) : 0;
-  tray.mat.uniforms.uRip.value.set(0, -(HUD.h / 2 - TRAY.slotB - 23) * SS, since * 620 * SS, rip * show);
+  tray.mat.uniforms.uRip.value.set(0, -(HUD.h / 2 - TRAY.slotB - 23) * S, since * 620 * S, rip * show);
   tray.mat.uniforms.uGlow.value = (T.dark ? 0.35 : 0.2) * rip * show;
   const pulse = rampS(t, B.land - 0.03, B.land + 0.05) * Math.exp(-Math.max(0, t - B.land - 0.05) / 0.25);
   keptChip.mat.uniforms.uGlow.value = (T.dark ? 0.8 : 0.4) * (1 - born) * op + (T.dark ? 0.6 : 0.32) * pulse + (T.dark ? 0.12 : 0.06) * ramp(t, B.land, B.land + 0.3) * op;

@@ -1,6 +1,6 @@
 {
   "name": "stillhunter",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Hunts bugs in a web app change the way a careful QA engineer would, and reports only bugs it has made happen twice in a real browser.",
   "author": {
     "name": "Stillhunter maintainers"
