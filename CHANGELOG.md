@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.5 (2026-11-15)
+
+- The README is short: what Stillhunter does, how to install it and four steps to a first hunt. The details it held (commands and flags, configuration, how a hunt works, kept tests, how probes are contained, an example report and the benchmark history) moved unchanged to `docs/guide.md`, and `SECURITY.md` links there.
+
 ## 0.2.4 (2026-11-15)
 
 - The README hero is sharper: it renders at 1664x832, which matches its 830 px width on a 2x screen, with twice the texture detail in the app's panes and a sharper WebP encoding. The design is unchanged.
