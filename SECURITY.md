@@ -11,7 +11,7 @@ A way for a probe or the hunter to get past a limit the guide says is enforced c
 A hunt runs code the model writes. The limits that are enforced are listed in the guide under [What a probe can and cannot do](docs/guide.md#what-a-probe-can-and-cannot-do). Two of them matter most when deciding where to run it:
 
 - **A probe's own Node code can reach the network.** Node's permission model has no loopback-only network setting, so only the browser is held to loopback hosts.
-- **A probe can print the session it signs in with, and the sign-in values it was given.** The runner masks session values in what a probe prints, but a value the probe encodes first gets through.
+- **A probe can print the session it signs in with, and the sign-in values it was given.** The runner masks saved-session values and raw sign-in values of four characters or more in what a probe prints and in its result files. A value the probe encodes first, a shorter sign-in value, or a secret printed by the configured reset command gets through.
 
 So hunt a local dev server with test accounts and test data, never production or real credentials, and treat a run folder's contents as visible to the hunter.
 

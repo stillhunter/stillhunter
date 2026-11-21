@@ -46,7 +46,7 @@ For example, "quick look at the invite dialog, only serious problems" becomes `<
     "dismissed": [{"probe": "...", "check": "...", "reason": "...", "why": "..."}],
     "leads": [{"title": "...", "why": "..."}]}
    ```
-   - Each finding names a probe and an expectation that fails in that probe's latest run. The runner re-runs each named probe twice from scratch, resetting app data first when that is configured, and keeps a finding only when its expectation fails both times. A re-run that ends before it reaches the expectation is listed as could not re-run, not counted.
+   - Each finding names a probe and an expectation that fails in that probe's latest run. The runner re-runs each named probe twice from scratch, resetting app data first when that is configured, and keeps a finding only when its expectation fails both times. One failure and one pass is intermittent; if either re-run ends before it reaches the expectation or starts from the wrong state, the claim is could not re-run, not counted, even when the other re-run fails.
    - List the most important findings first. The runner proves high severity first, then medium, then low, in your order within each, and writes the report after every probe it proves.
    - **Account for every failed expectation** in the latest run of every probe. Each one is a finding, or it is dismissed with a reason: `probe-wrong` (your probe was wrong), `duplicate` (add `"duplicateOf": "<the finding's exact title>"`), `intended` (the spec or the app asks for it), `not-this-change`, or `resilience-gap` (a weakness in how the app copes that a person would not notice).
    - Leads are suspicions you could not make happen. They are kept, not reported.

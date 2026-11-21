@@ -211,6 +211,11 @@ export async function runProbe(job: HostJob): Promise<ProbeResult> {
   result.refused = [...relay.refused];
   result.output = output.trim();
   if (result.hostError && result.output) result.error = `${result.error ?? ''} | output: ${result.output.slice(-400)}`;
-  // The session as it was before this run and as the run may have saved it.
-  return redact(result, [...new Set([...before, ...sessionValues(sessionFile)])]);
+  // The session as it was before this run and as the run may have saved it,
+  // plus the raw sign-in values the child was given.
+  const credentials = job.signInVariables.flatMap((name) => {
+    const value = process.env[name];
+    return value && value.length >= 4 ? [value] : [];
+  });
+  return redact(result, [...new Set([...before, ...sessionValues(sessionFile), ...credentials])]);
 }

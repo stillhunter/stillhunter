@@ -7,9 +7,9 @@ import path from 'node:path';
 import { chooseBrowser, installedOnThisMachine } from './browser.mjs';
 import { ensureRunsIgnored } from './change.mjs';
 import { block, type Context, fail, findTargetUrl, FOLDER, flag, loadRun, PROBE_NAME, readConfig, repoRoot, runsDir, signInVariableNames, stamp, testsDir } from './common.mjs';
-import { runProbe } from './probe-host.mjs';
-import { resetApp } from './reset.mjs';
-import { outcome, probesDir, type ProbeResult, signInProbe } from './results.mjs';
+import { runProbe, sessionPath } from './probe-host.mjs';
+import { resetAndSignIn } from './reset.mjs';
+import { type Before, outcome, probesDir, type ProbeResult, signInProbe } from './results.mjs';
 import { answers } from './target.mjs';
 
 export const SIGNIN = '_signin';
@@ -148,26 +148,39 @@ export async function replay(args: string[]): Promise<void> {
   const signInSource = path.join(testsDir(root), `${SIGNIN}.mjs`);
   const signInFile = existsSync(signInSource) ? stage(SIGNIN, signInSource) : null;
   const signInLines: string[] = [];
-  const signIn = async () => {
-    if (!signInFile) return;
+  const signInProblem = (r: ProbeResult | null | undefined) => r ? r.error ?? (r.savedSession ? null : 'it saved no session') : null;
+  const signIn = async (): Promise<ProbeResult | null> => {
+    if (!signInFile) return null;
     const r = await host(SIGNIN, signInFile);
-    const problem = r.error ?? (r.savedSession ? null : 'it saved no session');
+    const problem = signInProblem(r);
     if (problem) signInLines.push(`sign-in failed: ${problem}`);
+    return r;
   };
   const notes: string[] = [];
-  if (!config.reset) await signIn();
+  const initialSignIn = config.reset ? null : await signIn();
+  const initialProblem = signInProblem(initialSignIn);
 
   const lines: string[] = [];
   let failed = 0;
+  let inconclusive = 0;
   for (const t of selected) {
+    let before: Before | null = null;
     if (config.reset) {
-      const r = await resetApp(root, config);
-      if (r) notes.push(`before ${t.name}: ${r}`);
-      await signIn();
+      before = await resetAndSignIn({
+        root, config, probe: t.name, signIn: signInFile ? SIGNIN : null, sessionFile: sessionPath(dir),
+        runSignIn: async () => (await signIn())!,
+      });
+      if (before?.resetError) notes.push(`before ${t.name}: ${before.resetError}`);
     }
     const result: ProbeResult = await host(t.name, stage(t.name, path.join(testsDir(root), t.name, 'test.mjs')), watch);
+    const setupProblem = before?.resetError
+      ?? (before?.signIn?.error ? `sign-in failed: ${before.signIn.error}` : null)
+      ?? (initialProblem ? `sign-in failed: ${initialProblem}` : null);
     const o = outcome(result, t.meta.check);
-    if (o.state === 'held') {
+    if (setupProblem) {
+      inconclusive += 1;
+      lines.push(`INCONCLUSIVE  ${t.name}: ${t.meta.title} (${setupProblem})`);
+    } else if (o.state === 'held') {
       lines.push(`PASS  ${t.name}: ${t.meta.title} (expectation "${t.meta.check}" holds)`);
     } else {
       failed += 1;
@@ -177,12 +190,12 @@ export async function replay(args: string[]): Promise<void> {
     }
   }
   process.stdout.write(block([
-    `stillhunter | replay | ${selected.length} test${selected.length === 1 ? '' : 's'} | ${selected.length - failed} passed, ${failed} failed`,
+    `stillhunter | replay | ${selected.length} test${selected.length === 1 ? '' : 's'} | ${selected.length - failed - inconclusive} passed, ${failed} failed, ${inconclusive} inconclusive`,
     `target: ${target}${signInFile ? '' : ` | no ${SIGNIN}.mjs kept, so tests start signed out`}`,
     ...[...new Set(signInLines)],
     ...notes,
     ...lines,
     `results: ${FOLDER}/runs/${runId}/`,
   ]));
-  if (failed > 0) process.exitCode = 1;
+  if (failed + inconclusive > 0) process.exitCode = 1;
 }

@@ -10,7 +10,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { ALL_ARMS, checkPluginDir, outsideRepo, playwrightMcpCli, REPO, runClaude, seed, VARIANTS } from '../benchmark/comparison/lib.mjs';
+import { ALL_ARMS, checkPluginDir, MINUTES, outsideRepo, playwrightMcpCli, prompt, REPO, runClaude, seed, usesPlaywrightMcp, VARIANTS } from '../benchmark/comparison/lib.mjs';
 import { findingsFileState, huntFindings, huntFinishes, prepareTrial, SEED } from '../benchmark/comparison/trial.mjs';
 import { baseRef, collectChange } from '../dist/change.mjs';
 
@@ -23,6 +23,25 @@ function fakePlugin(dir) {
   }
   return dir;
 }
+
+test('the adversarial arm shares the playwright setup and adds independent falsification, with the same stated time for every arm', () => {
+  assert.ok(ALL_ARMS.includes('adversarial'));
+  assert.equal(usesPlaywrightMcp('playwright'), true);
+  assert.equal(usesPlaywrightMcp('adversarial'), true);
+  assert.equal(usesPlaywrightMcp('stillhunter'), false);
+  assert.equal(usesPlaywrightMcp('baseline'), false);
+  const vars = { WEB: 'http://localhost:3701', API: 'http://localhost:8701/api', SCRATCH: '/tmp/scratch', OUT: '/tmp/findings.json' };
+  const plain = prompt('playwright', vars);
+  const adversarial = prompt('adversarial', vars);
+  const withoutTools = (text) => [text.slice(0, text.indexOf('You have a Playwright browser')), text.slice(text.indexOf('\n\nRules:'))];
+  assert.deepEqual(withoutTools(adversarial), withoutTools(plain));
+  assert.match(adversarial, /falsify/i);
+  assert.match(adversarial, /fresh browser context/i);
+  assert.match(adversarial, /independent reproduction/i);
+  assert.match(plain, new RegExp(`You have about ${MINUTES} minutes`));
+  assert.match(adversarial, new RegExp(`You have about ${MINUTES} minutes`));
+  assert.equal(prompt('stillhunter', vars), `/stillhunter:hunt ${MINUTES} minutes`);
+});
 
 test('the stillhunter arm runs only from a plugin folder outside the repository with no benchmark folder', (t) => {
   assert.ok(!outsideRepo(REPO));
@@ -113,9 +132,19 @@ test('the claude call gets the checked plugin folder, never the repository', { s
   const args = JSON.parse(readFileSync(path.join(dir, 'args.json'), 'utf8'));
   assert.equal(args[args.indexOf('--plugin-dir') + 1], plugin);
   assert.throws(() => runClaude({ ...call, pluginDir: REPO }), /inside the repository/);
+  const mcpArgs = [];
+  for (const arm of ['playwright', 'adversarial']) {
+    const result = await runClaude({ ...call, arm, mcpFile: path.join(dir, 'mcp.json') });
+    assert.equal(result.code, 0, result.stderr);
+    const actual = JSON.parse(readFileSync(path.join(dir, 'args.json'), 'utf8'));
+    assert.equal(actual[actual.indexOf('--mcp-config') + 1], path.join(dir, 'mcp.json'));
+    assert.ok(!actual.includes('--plugin-dir'));
+    mcpArgs.push(actual);
+  }
+  assert.deepEqual(mcpArgs[1], mcpArgs[0]);
 });
 
-test('the playwright arm needs PW_MCP_DIR with @playwright/mcp installed, and says so', (t) => {
+test('the playwright arms need PW_MCP_DIR with the pinned @playwright/mcp version, and say so', (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'sh-pwmcp-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   assert.throws(() => playwrightMcpCli({}), /PW_MCP_DIR must name a folder with @playwright\/mcp@[\d.]+ installed: not set/);
@@ -123,6 +152,9 @@ test('the playwright arm needs PW_MCP_DIR with @playwright/mcp installed, and sa
   const cli = path.join(dir, 'node_modules', '@playwright', 'mcp', 'cli.js');
   mkdirSync(path.dirname(cli), { recursive: true });
   writeFileSync(cli, '');
+  writeFileSync(path.join(path.dirname(cli), 'package.json'), JSON.stringify({ version: '0.0.82' }));
+  assert.throws(() => playwrightMcpCli({ PW_MCP_DIR: dir }), /installed version 0\.0\.82, expected 0\.0\.83/);
+  writeFileSync(path.join(path.dirname(cli), 'package.json'), JSON.stringify({ version: '0.0.83' }));
   assert.equal(playwrightMcpCli({ PW_MCP_DIR: dir }), cli);
 });
 
@@ -178,8 +210,9 @@ test('analyze lists failed runs by name and reports how long finish took', (t) =
   trial('b__stillhunter__t1', { arm: 'stillhunter', findingsFile: 'ok', finishSeconds: 300, proofComplete: false });
   trial('c__stillhunter__t1', { arm: 'stillhunter', findingsFile: 'unreadable: Unexpected end of JSON input', finishSeconds: null, proofComplete: null });
   trial('d__playwright__t1', { arm: 'playwright', findingsFile: 'ok' });
+  trial('e__adversarial__t1', { arm: 'adversarial', findingsFile: 'ok' });
   const r = spawnSync(process.execPath, [path.join(REPO, 'benchmark', 'comparison', 'analyze.mjs')], {
-    encoding: 'utf8', env: { ...process.env, BENCH_RESULTS: results, BENCH_ARMS: 'playwright,stillhunter', BENCH_SET: '' },
+    encoding: 'utf8', env: { ...process.env, BENCH_RESULTS: results, BENCH_ARMS: 'playwright,adversarial,stillhunter', BENCH_SET: '' },
   });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^stillhunter a__stillhunter__t1, c__stillhunter__t1$/m);
@@ -189,6 +222,8 @@ test('analyze lists failed runs by name and reports how long finish took', (t) =
   const summary = JSON.parse(readFileSync(path.join(results, 'summary.json'), 'utf8'));
   assert.deepEqual(summary.per.stillhunter.failedRuns, ['a__stillhunter__t1', 'c__stillhunter__t1']);
   assert.equal(summary.per.stillhunter.maxFinishSeconds, 300);
+  assert.deepEqual(Object.keys(summary.pairs).sort(), ['adversarial vs playwright', 'stillhunter vs adversarial', 'stillhunter vs playwright']);
+  for (const comparison of Object.values(summary.pairs)) assert.equal(comparison.pairs, 1);
 });
 
 // Stands in for materialize: a variant committed with its base config, and a

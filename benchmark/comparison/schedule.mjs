@@ -5,7 +5,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { ARMS, HERE, playwrightMcpCli, preparePlugin, RESULTS, scrubPaths, trialId, VARIANTS } from './lib.mjs';
+import { ARMS, HERE, playwrightMcpCli, preparePlugin, RESULTS, scrubPaths, trialId, usesPlaywrightMcp, VARIANTS } from './lib.mjs';
 
 // A small seeded generator, so the order is the same on every machine.
 function shuffle(items, seed) {
@@ -28,8 +28,8 @@ writeFileSync(path.join(RESULTS, 'schedule.json'), JSON.stringify(order.map((j) 
 
 const pending = order.filter((j) => !existsSync(path.join(RESULTS, 'trials', trialId(j.v, j.arm, j.n), 'meta.json')));
 console.log(`${pending.length} of ${order.length} trials to run on ${lanes} lanes`);
-// Stop before any trial, not once per playwright trial.
-if (pending.some((j) => j.arm === 'playwright')) playwrightMcpCli();
+// Stop before any trial, not once per Playwright-arm trial.
+if (pending.some((j) => usesPlaywrightMcp(j.arm))) playwrightMcpCli();
 
 // One packed copy of the plugin for the whole schedule, outside the repository.
 const env = { ...process.env };

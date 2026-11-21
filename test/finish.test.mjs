@@ -72,10 +72,10 @@ test('a re-run that never evaluated the check makes the claim one that could not
   const both = judge(claim, [timedOut, skipped]);
   assert.equal(both.kind, 'notRerunnable');
   assert.equal(both.f.why, 're-run 1 never reached the check: probe timed out after 120 s and was stopped; re-run 2 never reached the check: the check is not in its result');
-  // Failed once, and never reached the check the other time: still not
-  // counted, and the reason the other re-run says nothing is kept.
+  // Failed once, and never reached the check the other time: inconclusive,
+  // not intermittent, because only one re-run evaluated the check.
   const half = judge(claim, [rerun([failing]), threw]);
-  assert.equal(half.kind, 'intermittent');
+  assert.equal(half.kind, 'notRerunnable');
   assert.match(half.f.why, /^failed on re-run 1; re-run 2 never reached the check: TypeError: /);
 });
 
@@ -93,10 +93,11 @@ test('a re-run that did not start as the hunt run did says nothing about the cla
   assert.equal(failedOut.f.why, 're-run 1 does not count: it ran signed out, as the sign-in after the reset failed, which it had not before the hunt run; re-run 2 does not count: it ran signed out, as the sign-in after the reset failed, which it had not before the hunt run');
   const held = rerun([holding], { before: signInFailed });
   assert.equal(judge(claim, [held, held], hunted(signedIn)).kind, 'notRerunnable');
-  // The same for a reset that failed before the re-run and not before the hunt run.
+  // The same for a reset that failed before the re-run and not before the hunt run:
+  // one valid failure is inconclusive, not intermittent.
   const unreset = rerun([failing], { before: { ...signedIn, resetError: 'reset ("node reset.mjs") failed: exit 5' } });
   const j = judge(claim, [unreset, rerun([failing], { before: signedIn })], hunted(signedIn));
-  assert.equal(j.kind, 'intermittent');
+  assert.equal(j.kind, 'notRerunnable');
   assert.match(j.f.why, /^re-run 1 does not count: the reset before it failed, as it had not before the hunt run; failed on re-run 2$/);
   // With no hunt run to compare (no reset then), any failed setup does not count.
   assert.equal(judge(claim, [out, out]).kind, 'notRerunnable');

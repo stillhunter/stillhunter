@@ -6,7 +6,7 @@ import { loadavg } from 'node:os';
 import path from 'node:path';
 import {
   ALL_ARMS, checkPluginDir, copyTranscripts, HERE, lanePorts, materializeVariant, mcpConfig, MODEL, newSessionId, outsideRepo, preparePlugin, prompt, RESULTS,
-  runClaude, scrubPaths, seed, sh, startApp, transcriptUsage, trialId, VARIANTS,
+  runClaude, scrubPaths, seed, sh, startApp, transcriptUsage, trialId, usesPlaywrightMcp, VARIANTS,
 } from './lib.mjs';
 
 export const SEED = path.join(HERE, 'seed.mjs');
@@ -119,7 +119,7 @@ async function main([feature, bug, arm, n, laneText]) {
     });
     writeFileSync(path.join(dest, 'prompt.txt'), scrubPaths(text) + '\n');
     const mcpFile = path.join(work, 'mcp.json');
-    if (arm === 'playwright') mcpConfig(mcpFile, path.join(scratch, 'playwright'));
+    if (usesPlaywrightMcp(arm)) mcpConfig(mcpFile, path.join(scratch, 'playwright'));
     meta.sessionId = sessionId;
     // A schedule packs the plugin once; a trial run on its own packs its own.
     let pluginDir = null;

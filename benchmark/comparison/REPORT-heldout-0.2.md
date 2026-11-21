@@ -27,4 +27,6 @@ Caveats:
 
 - The first pass ran without `PW_MCP_DIR`, so its playwright runs failed at once and left no results. A second pass then ran all 27 playwright runs, after the stillhunter runs. The seeded shuffle therefore did not interleave the arms in time.
 - The 0.2 engine was tuned on the tuning set by the same author who ran this test. The held-out bugs were not read before this run.
+- One playwright run changed source files; it remained scored and is counted in `summary.json` as `sourceChanged`. The report does not exclude or reweight source-modifying runs.
+- This two-arm report predates the explicit adversarial-verification arm. It contains no measurement of that arm.
 - The raw results (transcripts, judge and verify output, `summary.json`) are kept out of git (`benchmark/comparison/results/`). They are 64 MB and contain local paths.

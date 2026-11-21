@@ -30,9 +30,10 @@ const FEATURES_DIR = path.join(REPO, 'benchmark/apps/garden-log/features');
 export const HELDOUT = Object.fromEntries(FEATURES.map((f) => [f, existsSync(path.join(FEATURES_DIR, f, 'bugs')) ? readdirSync(path.join(FEATURES_DIR, f, 'bugs')).filter((b) => /^hx\d+$/.test(b)).sort() : []]));
 export const SET = process.env.BENCH_SET === 'heldout' ? HELDOUT : BUGS;
 export const VARIANTS = FEATURES.flatMap((f) => [...SET[f], 'clean'].map((bug) => ({ feature: f, bug })));
-export const ALL_ARMS = ['baseline', 'playwright', 'stillhunter'];
+export const ALL_ARMS = ['baseline', 'playwright', 'adversarial', 'stillhunter'];
+export const usesPlaywrightMcp = (arm) => arm === 'playwright' || arm === 'adversarial';
 // BENCH_ARMS picks which arms a schedule and its analysis cover.
-export const ARMS = process.env.BENCH_ARMS ? process.env.BENCH_ARMS.split(',') : ['playwright', 'stillhunter'];
+export const ARMS = process.env.BENCH_ARMS ? process.env.BENCH_ARMS.split(',') : ['playwright', 'adversarial', 'stillhunter'];
 
 export const trialId = (v, arm, n) => `${v.feature}__${v.bug}__${arm}__t${n}`;
 
@@ -139,7 +140,7 @@ export function checklist() {
 }
 
 export function prompt(arm, vars) {
-  if (arm === 'stillhunter') return '/stillhunter:hunt';
+  if (arm === 'stillhunter') return `/stillhunter:hunt ${MINUTES} minutes`;
   const tools = readFileSync(path.join(HERE, `prompts/tools-${arm}.md`), 'utf8').trim();
   let text = readFileSync(path.join(HERE, 'prompts/common.md'), 'utf8');
   for (const [k, v] of Object.entries({ ...vars, TOOLS: tools, CHECKLIST: checklist(), MINUTES: String(MINUTES) })) text = text.replaceAll(`{{${k}}}`, v);
@@ -148,11 +149,14 @@ export function prompt(arm, vars) {
 }
 
 // PW_MCP_DIR names a folder with @playwright/mcp at PLAYWRIGHT_MCP installed
-// (npm install @playwright/mcp@<version> there); the playwright arm and the
+// (npm install @playwright/mcp@<version> there); both Playwright arms and the
 // verifier run it from there.
 export function playwrightMcpCli(env = process.env) {
   const cli = env.PW_MCP_DIR ? path.join(env.PW_MCP_DIR, 'node_modules/@playwright/mcp/cli.js') : null;
   if (!cli || !existsSync(cli)) throw new Error(`PW_MCP_DIR must name a folder with @playwright/mcp@${PLAYWRIGHT_MCP} installed: ${env.PW_MCP_DIR ?? 'not set'}`);
+  let version = 'unknown';
+  try { version = JSON.parse(readFileSync(path.join(path.dirname(cli), 'package.json'), 'utf8')).version ?? 'unknown'; } catch {}
+  if (version !== PLAYWRIGHT_MCP) throw new Error(`PW_MCP_DIR has @playwright/mcp installed version ${version}, expected ${PLAYWRIGHT_MCP}`);
   return cli;
 }
 
@@ -168,7 +172,7 @@ export function mcpConfig(file, outDir) {
 export function runClaude({ cwd, arm, text, sessionId, outDir, mcpFile, pluginDir }) {
   const args = ['-p', text, '--model', MODEL, '--setting-sources', 'project', '--strict-mcp-config',
     '--permission-mode', 'bypassPermissions', '--output-format', 'json', '--session-id', sessionId, '--add-dir', outDir];
-  if (arm === 'playwright') args.push('--mcp-config', mcpFile);
+  if (usesPlaywrightMcp(arm)) args.push('--mcp-config', mcpFile);
   if (arm === 'stillhunter') args.push('--plugin-dir', checkPluginDir(pluginDir));
   // BENCH_MAX_BUDGET_USD stops a session once it has spent that much.
   if (process.env.BENCH_MAX_BUDGET_USD) args.push('--max-budget-usd', process.env.BENCH_MAX_BUDGET_USD);

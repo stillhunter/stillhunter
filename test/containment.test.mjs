@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { DECOY, hunt, makeRepo, noBrowser, probe, runIdOf, SIGNIN_PROBE, startFixture } from './helpers.mjs';
+import { DECOY, hunt, makeRepo, noBrowser, probe, runIdOf, SIGN_IN, SIGNIN_PROBE, startFixture } from './helpers.mjs';
 
 describe('containment', { skip: noBrowser, timeout: 300_000 }, () => {
   let app;
@@ -244,9 +244,9 @@ describe('containment', { skip: noBrowser, timeout: 300_000 }, () => {
     assert.match(String(r.result.error), /unhandled rejection|Timeout/i);
   });
 
-  // The child reads the saved session to start signed in, so a probe can
-  // print it; what the runner keeps and shows never holds its values.
-  test('a probe that prints the saved session leaves no session value in its result', () => {
+  // The child reads the saved session and sign-in variables, so a probe can
+  // print them; what the runner keeps and shows never holds their raw values.
+  test('a probe that prints the saved session or a sign-in value leaves no raw value in its result', () => {
     const signedIn = probe(dir, runId, 'signin', SIGNIN_PROBE);
     assert.equal(signedIn.result?.checks?.[0]?.pass, true, signedIn.stdout);
     const session = JSON.parse(readFileSync(path.join(dir, '.stillhunter', 'runs', runId, 'scratch', 'session.json'), 'utf8'));
@@ -258,9 +258,11 @@ describe('containment', { skip: noBrowser, timeout: 300_000 }, () => {
         const text = fs.readFileSync(path.join(process.cwd(), 'session.json'), 'utf8');
         rr.expect('session-readable', text.length > 0, String(text.length));
         console.log(text);
+        console.log(process.env.SHFIX_PASSWORD);
         rr.note('session', text);
+        rr.note('password', process.env.SHFIX_PASSWORD);
         rr.note('cookies', await rr.context.cookies());
-        rr.expect('leak-in-detail', false, text);
+        rr.expect('leak-in-detail', false, text + ' ' + process.env.SHFIX_PASSWORD);
         await rr.goto('/');
         rr.note('page-cookie', await rr.page.evaluate(() => document.cookie));
       }`);
@@ -269,6 +271,7 @@ describe('containment', { skip: noBrowser, timeout: 300_000 }, () => {
     const kept = readFileSync(path.join(dir, '.stillhunter', 'runs', runId, 'probes', 'leak.result.json'), 'utf8');
     for (const shown of [r.stdout, kept]) {
       assert.equal(values.filter((v) => shown.includes(v)).length, 0, 'no session value is shown or kept');
+      assert.ok(!shown.includes(SIGN_IN.SHFIX_PASSWORD), 'no raw sign-in value is shown or kept');
       assert.ok(shown.includes('[session value]'));
     }
   });

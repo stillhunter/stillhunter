@@ -128,7 +128,10 @@ for (const arm of ARMS) {
 }
 
 const pairs = {};
-const PAIRS = [['stillhunter', 'playwright'], ['stillhunter', 'baseline'], ['playwright', 'baseline']].filter(([a, b]) => ARMS.includes(a) && ARMS.includes(b));
+const PAIRS = [
+  ['stillhunter', 'playwright'], ['stillhunter', 'adversarial'], ['stillhunter', 'baseline'],
+  ['adversarial', 'playwright'], ['adversarial', 'baseline'], ['playwright', 'baseline'],
+].filter(([a, b]) => ARMS.includes(a) && ARMS.includes(b));
 for (const [a, b] of PAIRS) {
   const oa = Object.fromEntries(per[a].outcomes.map((o) => [`${o.bug}#${o.n}`, o.found]));
   const ob = Object.fromEntries(per[b].outcomes.map((o) => [`${o.bug}#${o.n}`, o.found]));

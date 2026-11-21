@@ -337,10 +337,44 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 900_000 }
     assert.equal(passing.status, 0, passing.stdout);
     assert.match(passing.stdout, /stillhunter \| replay \| 1 test \| 1 passed, 0 failed/);
     assert.match(passing.stdout, /PASS {2}items-load-error: .*\(expectation "load-failure-shown-as-error" holds\)/);
+
+    writeFileSync(path.join(dir, 'bad-replay-reset.mjs'), "process.exit(9);\n");
+    writeFileSync(path.join(dir, '.stillhunter', 'config.json'), JSON.stringify({ target: { url: app.url }, reset: 'node bad-replay-reset.mjs' }));
+    const unreset = hunt(['replay', 'items-load-error'], { cwd: dir });
+    assert.equal(unreset.status, 1, unreset.stdout);
+    assert.match(unreset.stdout, /stillhunter \| replay \| 1 test \| 0 passed, 0 failed, 1 inconclusive/);
+    assert.match(unreset.stdout, /INCONCLUSIVE {2}items-load-error: .*reset \("node bad-replay-reset\.mjs"\) failed: exit 9/);
+    writeFileSync(path.join(dir, '.stillhunter', 'config.json'), JSON.stringify({ target: { url: app.url }, reset: 'node reset.mjs' }));
+
+    const tests = path.join(dir, '.stillhunter', 'tests');
+    for (const name of ['replay-first', 'replay-second']) {
+      mkdirSync(path.join(tests, name));
+      writeFileSync(path.join(tests, name, 'test.mjs'), "export default async function (rr) { rr.expect('setup-check', true); }\n");
+      writeFileSync(path.join(tests, name, 'test.json'), JSON.stringify({ check: 'setup-check', title: 'Setup is reliable', severity: 'low', keptFrom: { run: runId, probe: name } }));
+    }
+    const signInFile = path.join(tests, '_signin.mjs');
+    writeFileSync(signInFile, SIGNIN_PROBE.replace('export default async function (rr) {\n', `import fs from 'node:fs';
+export default async function (rr) {
+  const n = fs.existsSync('replay-signin-count') ? Number(fs.readFileSync('replay-signin-count', 'utf8')) + 1 : 1;
+  fs.writeFileSync('replay-signin-count', String(n));
+  if (n > 1) throw new Error('replay sign-in failed before saving');
+`));
+    writeFileSync(path.join(dir, 'reset-keeping-sessions.mjs'), `await fetch(${JSON.stringify(`${app.url}/__reset?sessions=keep`)}, { method: 'POST' });\n`);
+    writeFileSync(path.join(dir, '.stillhunter', 'config.json'), JSON.stringify({ target: { url: app.url }, reset: 'node reset-keeping-sessions.mjs' }));
+    const badSignIn = hunt(['replay', 'replay-first', 'replay-second'], { cwd: dir });
+    assert.equal(badSignIn.status, 1, badSignIn.stdout);
+    assert.match(badSignIn.stdout, /stillhunter \| replay \| 2 tests \| 1 passed, 0 failed, 1 inconclusive/);
+    assert.match(badSignIn.stdout, /INCONCLUSIVE {2}replay-second: .*sign-in failed: Error: replay sign-in failed before saving/);
+    const replayDir = /^results: (.+)$/m.exec(badSignIn.stdout)?.[1];
+    assert.ok(replayDir, badSignIn.stdout);
+    assert.ok(!existsSync(path.join(dir, replayDir, 'scratch', 'session.json')), 'a failed re-sign-in cannot reuse the previous test\'s session');
+    writeFileSync(signInFile, SIGNIN_PROBE);
+    writeFileSync(path.join(dir, '.stillhunter', 'config.json'), JSON.stringify({ target: { url: app.url }, reset: 'node reset.mjs' }));
+
     const stillBroken = hunt(['replay', 'throws-early'], { cwd: dir });
     assert.equal(stillBroken.status, 1, stillBroken.stdout);
     assert.match(stillBroken.stdout, /FAIL {2}throws-early: .*not reached/);
-    assert.match(hunt(['replay', 'nope'], { cwd: dir }).stdout, /No kept test named nope\. Kept tests: items-load-error, throws-early\./);
+    assert.match(hunt(['replay', 'nope'], { cwd: dir }).stdout, /No kept test named nope\. Kept tests: items-load-error, replay-first, replay-second, throws-early\./);
   });
 
   test('the decoy variable never reached a probe', () => {

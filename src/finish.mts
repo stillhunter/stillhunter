@@ -159,19 +159,20 @@ async function prove(p: Prover, probe: string): Promise<ProbeResult[] | null> {
 type Judged = { kind: 'confirmed'; f: Confirmed } | { kind: 'intermittent' | 'dropped' | 'notRerunnable'; f: Unconfirmed };
 type Read = { state: 'failed'; detail: string } | { state: 'held' } | { state: 'none'; why: string };
 
-// Confirmed when the check failed in both re-runs, intermittent when in one.
-// Otherwise it did not reproduce only if the check ran and held both times. A
-// re-run says nothing about the bug when it never got to the check (the probe
-// threw or timed out first, or the check is not in its result), or when it
-// did not start as the hunt run did (its reset or its sign-in failed, and the
-// hunt run's had not): then the claim could not be re-run.
+// Confirmed when the check failed in both re-runs, intermittent when it failed
+// one and held in the other. Otherwise it did not reproduce only if the check
+// ran and held both times. A re-run says nothing about the bug when it never
+// got to the check (the probe threw or timed out first, or the check is not in
+// its result), or when it did not start as the hunt run did (its reset or its
+// sign-in failed, and the hunt run's had not): then the claim could not be
+// re-run, even when the other re-run failed.
 export function judge(f: Finding, runs: ProbeResult[], hunt?: ProbeResult): Judged {
   const severity = severityOf(f.severity);
   const reads = runs.map((r, i) => readRun(r, i + 1, f.check, hunt));
   const failed = reads.flatMap((o) => (o.state === 'failed' ? [o.detail] : []));
   if (failed.length === runs.length) return { kind: 'confirmed', f: { ...f, severity, runs: failed } };
   const why = reads.map((o, i) => (o.state === 'none' ? o.why : `${o.state} on re-run ${i + 1}`)).join('; ');
-  const kind = failed.length ? 'intermittent' : reads.every((o) => o.state === 'held') ? 'dropped' : 'notRerunnable';
+  const kind = reads.some((o) => o.state === 'none') ? 'notRerunnable' : failed.length ? 'intermittent' : 'dropped';
   return { kind, f: { ...f, severity, why } };
 }
 
