@@ -82,3 +82,17 @@ The `.stillhunter/` folder holds a signed-in session in each run folder; `start`
 ## Where it stands
 
 Stillhunter grew out of [rough-ride](https://github.com/rough-ride/rough-ride). Its engine's first test, on six bugs kept from its author until the engine was frozen, caught the planted bug in 15 of 18 runs with 0.4 false alarms per run. Claude Code with Playwright and a resilience checklist caught 18 of 18 with 3.3 ([report](https://github.com/rough-ride/rough-ride/blob/main/benchmark/comparison/REPORT-hunt.md)). This release closes the gaps that test found ([design](design-0.2.md)). On six new held-out bugs, 0.2.0 caught the planted bug in 17 of 18 runs with 0.41 false alarms per run, against 15 of 18 with 3.15 for Claude Code with Playwright ([report](../benchmark/comparison/REPORT-heldout-0.2.md)). With 18 paired runs the recall gap is not significant; the false-alarm gap is.
+
+The latest evaluation, of 0.2.5, adds a third arm: Claude Code with the same Playwright tools, told to try to disprove each finding and to reproduce it from the start in a fresh browser context. Nine variants (the six held-out planted bugs and three clean features) ran three times in each arm, 81 trials in all, with `claude-opus-5-5` and the same stated 30-minute hunting budget ([report](../benchmark/comparison/REPORT-three-arm-0.2.md)):
+
+| Arm | Planted bug found | Findings confirmed | False alarms per run | Valid regression tests | Median time | Median price |
+|---|---:|---:|---:|---:|---:|---:|
+| Claude Code with Playwright | 16 of 18 | 47% | 3.37 | 12 of 16 | 3.6 min | $0.62 |
+| The same, told to verify each finding | 16 of 18 | 47% | 3.07 | 14 of 16 | 4.4 min | $0.64 |
+| Stillhunter | 18 of 18 | 95% | 0.26 | 17 of 18 | 11.3 min | $1.55 |
+
+- **Checked independently.** Two blind judge passes matched every finding to the planted bug or not, and a separate verifier tried to reproduce each planted report and each other issue they raised. Every planted report from every arm was confirmed. "Findings confirmed" is the share of all findings the verifier confirmed.
+- **Regression tests.** Each arm left a test for every planted bug it found; for Stillhunter, the test `keep` saved. A test is valid when it fails twice on the buggy code and passes on the clean code.
+- **What is significant.** The recall gap is not (exact McNemar p = 0.5 against either arm); the false-alarm gap is (permutation p about 0.0001). Telling Claude Code to verify each finding did not improve its recall or its precision.
+- **Time and price.** Stillhunter's proof runs after its hunting budget, while the other arms verify inside theirs, so Stillhunter took about three times as long and cost about 2.5 times as much per run. Prices are API list-price equivalents.
+- **Limits.** Three trials on one family of apps measure repeatability on this benchmark, not how the result carries over to other apps, models or kinds of bug. A one-trial [pilot](../benchmark/comparison/REPORT-three-arm-pilot.md) of the three arms came first and is reported separately.
