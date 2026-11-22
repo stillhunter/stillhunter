@@ -160,6 +160,15 @@ export function playwrightMcpCli(env = process.env) {
   return cli;
 }
 
+export function writeTestRuntime(scratch, env = process.env) {
+  const cli = playwrightMcpCli(env);
+  const dir = path.join(scratch, 'tests');
+  mkdirSync(dir, { recursive: true });
+  const runtime = path.join(dir, 'runtime.mjs');
+  writeFileSync(runtime, `import { createRequire } from 'node:module';\nimport assert from 'node:assert/strict';\nconst { chromium } = createRequire(${JSON.stringify(cli)})('playwright-core');\nexport { assert, chromium };\n`);
+  return runtime;
+}
+
 export function mcpConfig(file, outDir) {
   const cli = playwrightMcpCli();
   writeFileSync(file, JSON.stringify({ mcpServers: { playwright: {

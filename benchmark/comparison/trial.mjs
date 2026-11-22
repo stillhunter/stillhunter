@@ -5,8 +5,8 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, 
 import { loadavg } from 'node:os';
 import path from 'node:path';
 import {
-  ALL_ARMS, checkPluginDir, copyTranscripts, HERE, lanePorts, materializeVariant, mcpConfig, MODEL, newSessionId, outsideRepo, preparePlugin, prompt, RESULTS,
-  runClaude, scrubPaths, seed, sh, startApp, transcriptUsage, trialId, usesPlaywrightMcp, VARIANTS,
+  ALL_ARMS, checkPluginDir, copyTranscripts, DEMO, HERE, lanePorts, materializeVariant, mcpConfig, MODEL, newSessionId, outsideRepo, preparePlugin, prompt, RESULTS,
+  runClaude, scrubPaths, seed, sh, startApp, transcriptUsage, trialId, usesPlaywrightMcp, VARIANTS, writeTestRuntime,
 } from './lib.mjs';
 
 export const SEED = path.join(HERE, 'seed.mjs');
@@ -87,6 +87,23 @@ export function huntFindings(repo) {
   )));
 }
 
+export function keepConfirmedTests(repo, pluginDir) {
+  const kept = [];
+  const errors = [];
+  let index = 0;
+  for (const { run, findings } of huntRuns(repo).filter((r) => r.findings)) {
+    for (const finding of findings.confirmed ?? []) {
+      const name = `benchmark-${++index}`;
+      const r = sh(process.execPath, [path.join(pluginDir, 'dist', 'hunt.mjs'), 'keep', '--run', run, '--probe', finding.probe, '--check', finding.check, '--as', name], {
+        cwd: repo, env: { ...process.env, ...DEMO }, allowFail: true,
+      });
+      if (r.status === 0) kept.push({ title: finding.title, name });
+      else errors.push(`${finding.title}: ${(r.stderr || r.stdout).trim().split('\n').slice(-2).join(' ')}`);
+    }
+  }
+  return { kept, errors };
+}
+
 async function main([feature, bug, arm, n, laneText]) {
   const v = VARIANTS.find((x) => x.feature === feature && x.bug === bug);
   if (!v || !ALL_ARMS.includes(arm) || !/^\d+$/.test(n) || !/^\d$/.test(laneText)) {
@@ -119,7 +136,10 @@ async function main([feature, bug, arm, n, laneText]) {
     });
     writeFileSync(path.join(dest, 'prompt.txt'), scrubPaths(text) + '\n');
     const mcpFile = path.join(work, 'mcp.json');
-    if (usesPlaywrightMcp(arm)) mcpConfig(mcpFile, path.join(scratch, 'playwright'));
+    if (usesPlaywrightMcp(arm)) {
+      mcpConfig(mcpFile, path.join(scratch, 'playwright'));
+      writeTestRuntime(scratch);
+    }
     meta.sessionId = sessionId;
     // A schedule packs the plugin once; a trial run on its own packs its own.
     let pluginDir = null;
@@ -150,6 +170,9 @@ async function main([feature, bug, arm, n, laneText]) {
       meta.finishes = huntFinishes(repo);
       meta.finishSeconds = meta.finishes.length ? Math.max(...meta.finishes.map((f) => f.finishSeconds ?? 0)) : null;
       meta.proofComplete = meta.finishes.length ? meta.finishes.every((f) => f.complete !== false) : null;
+      const keepStarted = Date.now();
+      meta.regressionRetention = keepConfirmedTests(repo, pluginDir);
+      meta.wallMs += Date.now() - keepStarted;
       if (existsSync(path.join(repo, '.stillhunter'))) cpSync(path.join(repo, '.stillhunter'), path.join(dest, 'stillhunter'), { recursive: true });
     } else if (existsSync(path.join(outDir, 'findings.json'))) {
       try { findings = JSON.parse(readFileSync(path.join(outDir, 'findings.json'), 'utf8')).findings ?? []; meta.findingsFile = 'ok'; }

@@ -65,6 +65,17 @@ for (const f of FEATURES) {
   for (const k of readdirSync(dir)) { const v = readJson(path.join(dir, k, 'verdict.json')); if (v) verdicts[`${f}/${k}`] = v; }
 }
 
+const regressions = {};
+for (const f of FEATURES) {
+  const dir = path.join(RESULTS, 'regression', f);
+  if (!existsSync(dir)) continue;
+  for (const file of readdirSync(dir).filter((file) => file.endsWith('.json'))) {
+    const r = readJson(path.join(dir, file));
+    if (r?.findingKey) regressions[r.findingKey] = r;
+  }
+}
+
+const reproductionOf = Object.fromEntries(Object.values(verdicts).filter((v) => v.findingKey).map((v) => [v.findingKey, v.verdict]));
 const rows = [];
 let agree = 0, compared = 0;
 for (const t of trials) {
@@ -78,7 +89,7 @@ for (const t of trials) {
       const v = verdicts[`${t.meta.feature}/${j.issue}`]?.verdict;
       cls = v === 'confirmed' ? 'extra-confirmed' : v === 'not-a-defect' || v === 'not-reproduced' ? `false-${v}` : 'unverified';
     }
-    rows.push({ trial: t.id, arm: t.meta.arm, feature: t.meta.feature, bug: t.meta.bug, n: t.meta.trial, status: f.status, state: f.tool?.state ?? null, cls, issue: j ? `${t.meta.feature}/${j.issue}` : null });
+    rows.push({ trial: t.id, arm: t.meta.arm, feature: t.meta.feature, bug: t.meta.bug, n: t.meta.trial, status: f.status, state: f.tool?.state ?? null, cls, issue: j ? `${t.meta.feature}/${j.issue}` : null, reproduction: j?.planted ? reproductionOf[key] ?? 'unverified' : null, regression: cls === 'planted-observed' ? regressions[key]?.classification ?? 'unevaluated' : null });
   });
 }
 
@@ -98,11 +109,22 @@ for (const arm of ARMS) {
   const sum = (xs) => xs.reduce((a, b) => a + b, 0);
   const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length ? (s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : null; };
   const costs = ts.map((t) => costOf(t.meta)).filter((c) => c !== null);
+  const planted = fr.filter((r) => r.cls.startsWith('planted'));
+  const reproductionCount = (state) => planted.filter((r) => r.reproduction === state).length;
+  const regressionRows = fr.filter((r) => r.cls === 'planted-observed');
+  const regressionCount = (state) => regressionRows.filter((r) => r.regression === state).length;
   per[arm] = {
     runs: ts.length,
     recall: { found: k, chances: outcomes.length, wilson95: wilson(k, outcomes.length), mentionedOnly: outcomes.filter((o) => o.mentioned).length,
       inside: [inside.filter((o) => o.found).length, inside.length], outside: [outside.filter((o) => o.found).length, outside.length] },
     perBug: Object.fromEntries(Object.values(BUGS).flat().map((b) => [b, outcomes.filter((o) => o.bug === b && o.found).length + '/' + outcomes.filter((o) => o.bug === b).length])),
+    plantedReproduction: { total: planted.length, confirmed: reproductionCount('confirmed'), notReproduced: reproductionCount('not-reproduced'), notADefect: reproductionCount('not-a-defect'), inconclusive: reproductionCount('inconclusive'), unverified: reproductionCount('unverified') },
+    regressionTests: {
+      eligible: regressionRows.length,
+      available: regressionRows.filter((r) => !['missing', 'unevaluated'].includes(r.regression)).length,
+      valid: regressionCount('valid'), notSensitive: regressionCount('not-sensitive'), wrongExpectation: regressionCount('wrong-expectation'),
+      unstable: regressionCount('unstable'), inconclusive: regressionCount('inconclusive'), missing: regressionCount('missing'), unevaluated: regressionCount('unevaluated'),
+    },
     findings: fr.length,
     byClass: fr.reduce((m, r) => ((m[r.cls] = (m[r.cls] ?? 0) + 1), m), {}),
     precision: decided ? real / decided : null,
@@ -150,6 +172,7 @@ console.log('|---|---|---|---|---|---|---|---|---|---|---|');
 for (const arm of ARMS) {
   const p = per[arm];
   console.log(`| ${arm} | ${p.runs} | ${p.failedRuns.length} | ${p.recall.found}/${p.recall.chances} | ${pct(p.recall.wilson95[0])} to ${pct(p.recall.wilson95[1])} | ${p.recall.inside.join('/')} , ${p.recall.outside.join('/')} | ${p.findings} | ${pct(p.precision)} | ${p.falseAlarmsPerRun?.toFixed(2)} | ${p.medianWallMin?.toFixed(1)} min | ${p.medianCostUsd == null ? 'n/a' : `$${p.medianCostUsd.toFixed(2)}`} |`);
+  console.log(`${arm} planted reproduction: ${p.plantedReproduction.confirmed}/${p.plantedReproduction.total} confirmed; regression tests: ${p.regressionTests.valid}/${p.regressionTests.eligible} valid, ${p.regressionTests.available} available`);
 }
 console.log('\nFailed runs (no findings.json, counted as not found):');
 for (const arm of ARMS) console.log(arm, per[arm].failedRuns.length ? per[arm].failedRuns.join(', ') : 'none');

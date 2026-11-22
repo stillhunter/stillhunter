@@ -59,7 +59,34 @@ function extractJson(text) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
-function main([passText = '1', ...features]) {
+export function judgmentCoverage(items, answer) {
+  const counts = new Map();
+  const reports = Array.isArray(answer?.reports) ? answer.reports : [];
+  for (const r of reports) counts.set(r.id, (counts.get(r.id) ?? 0) + 1);
+  const expected = new Set(items.map((item) => item.id));
+  return {
+    missing: items.map((item) => item.id).filter((id) => !counts.has(id)),
+    duplicates: items.map((item) => item.id).filter((id) => counts.get(id) > 1),
+    unknown: [...new Set([...counts.keys()].filter((id) => !expected.has(id)))],
+  };
+}
+
+export async function judgeWithRetry(items, call) {
+  let answer;
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { answer = await call(); lastError = null; }
+    catch (e) { lastError = e; continue; }
+    const coverage = judgmentCoverage(items, answer);
+    if (!coverage.missing.length && !coverage.duplicates.length && !coverage.unknown.length) {
+      const byId = new Map((Array.isArray(answer?.reports) ? answer.reports : []).map((r) => [r.id, r]));
+      return { ...answer, reports: items.map((item) => byId.get(item.id)) };
+    }
+  }
+  return lastError ? { reports: [], issues: {}, error: lastError.message } : answer;
+}
+
+async function main([passText = '1', ...features]) {
   const pass = Number(passText);
   const trials = scoredTrials();
   mkdirSync(path.join(RESULTS, 'judge'), { recursive: true });
@@ -76,15 +103,20 @@ function main([passText = '1', ...features]) {
       });
     }
     const text = judgePrompt(feature, shuffled(items, pass));
-    const r = spawnSync('claude', ['-p', '--model', MODEL, '--setting-sources', 'project', '--strict-mcp-config', '--tools', '', '--output-format', 'json', '--no-session-persistence'],
-      { input: text, encoding: 'utf8', cwd: path.join(RESULTS, 'judge'), maxBuffer: 64 * 1024 * 1024, timeout: 30 * 60 * 1000 });
-    const outer = JSON.parse(r.stdout);
-    const answer = extractJson(outer.result);
-    const reports = answer.reports.map((x) => ({ ...x, key: keyOf[x.id] }));
-    const missing = items.filter((it) => !reports.some((x) => x.id === it.id)).map((it) => it.id);
-    writeFileSync(path.join(RESULTS, 'judge', `${feature}.pass${pass}.json`), JSON.stringify({ feature, pass, count: items.length, missing, costUsd: outer.total_cost_usd, reports, issues: answer.issues }, null, 2) + '\n');
-    console.log(`${feature} pass ${pass}: ${items.length} reports, ${Object.keys(answer.issues).length} issues, ${missing.length} missing`);
+    const costs = [];
+    const answer = await judgeWithRetry(items, async () => {
+      const r = spawnSync('claude', ['-p', '--model', MODEL, '--setting-sources', 'project', '--strict-mcp-config', '--tools', '', '--output-format', 'json', '--no-session-persistence'],
+        { input: text, encoding: 'utf8', cwd: path.join(RESULTS, 'judge'), maxBuffer: 64 * 1024 * 1024, timeout: 30 * 60 * 1000 });
+      const outer = JSON.parse(r.stdout);
+      costs.push(outer.total_cost_usd ?? 0);
+      return extractJson(outer.result);
+    });
+    const coverage = judgmentCoverage(items, answer);
+    const issues = answer?.issues && typeof answer.issues === 'object' ? answer.issues : {};
+    const reports = (Array.isArray(answer?.reports) ? answer.reports : []).filter((x) => keyOf[x.id]).map((x) => ({ ...x, key: keyOf[x.id] }));
+    writeFileSync(path.join(RESULTS, 'judge', `${feature}.pass${pass}.json`), JSON.stringify({ feature, pass, count: items.length, ...coverage, costUsd: costs.reduce((a, b) => a + b, 0), reports, issues }, null, 2) + '\n');
+    console.log(`${feature} pass ${pass}: ${items.length} reports, ${Object.keys(issues).length} issues, ${coverage.missing.length} missing, ${coverage.duplicates.length} duplicate, ${coverage.unknown.length} unknown`);
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main(process.argv.slice(2));
+if (import.meta.url === `file://${process.argv[1]}`) main(process.argv.slice(2)).catch((e) => { console.error(e); process.exit(1); });
