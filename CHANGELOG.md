@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The README's benchmark link points to the three-trial, three-arm evaluation instead of the earlier two-arm report.
+
 - A claim with one failed proof re-run and another that never reached its check, or started after a failed reset or sign-in, is now could not re-run rather than intermittent.
 - Replay drops stale sessions with each reset and reports reset or sign-in failures as inconclusive, with a nonzero exit, instead of passing the test.
 - Probe output and result files mask raw sign-in values as well as saved-session values; encoded values and reset-command output remain outside that protection.

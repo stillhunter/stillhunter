@@ -52,5 +52,5 @@ Use a local app with test data only: Stillhunter runs code the model writes agai
 ## Learn more
 
 - [Guide](https://github.com/stillhunter/stillhunter/blob/main/docs/guide.md): all commands and settings, how a hunt works, and how probes are contained
-- [Benchmark](https://github.com/stillhunter/stillhunter/blob/main/benchmark/comparison/REPORT-heldout-0.2.md): found the planted bug in 17 of 18 runs, with 0.41 false alarms per run
+- [Benchmark](https://github.com/stillhunter/stillhunter/blob/main/benchmark/comparison/REPORT-three-arm-0.2.md): on six held-out planted bugs, three runs each, found the planted bug in 18 of 18 runs with 0.26 false alarms per run, and 17 of its 18 kept tests were valid. Claude Code with Playwright found 16 of 18 with about 3 false alarms per run, with or without a prompt to verify each finding. Stillhunter took about three times as long. The recall gap is not significant; the false-alarm gap is.
 - [Changelog](https://github.com/stillhunter/stillhunter/blob/main/CHANGELOG.md) · [Security](https://github.com/stillhunter/stillhunter/blob/main/SECURITY.md) · MIT licence
