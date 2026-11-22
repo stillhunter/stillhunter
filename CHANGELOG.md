@@ -5,7 +5,7 @@
 - A claim with one failed proof re-run and another that never reached its check, or started after a failed reset or sign-in, is now could not re-run rather than intermittent.
 - Replay drops stale sessions with each reset and reports reset or sign-in failures as inconclusive, with a nonzero exit, instead of passing the test.
 - Probe output and result files mask raw sign-in values as well as saved-session values; encoded values and reset-command output remain outside that protection.
-- The comparison benchmark adds an explicit adversarial-verification Playwright arm, gives every arm the same stated 30-minute hunting budget, enforces the pinned MCP version and analyzes all three pairwise comparisons. A [one-trial held-out pilot](benchmark/comparison/REPORT-three-arm-pilot.md) measured all three arms; it is exploratory, not a three-trial result.
+- The comparison benchmark adds an explicit adversarial-verification Playwright arm, gives every arm the same stated 30-minute hunting budget, enforces the pinned MCP version and analyzes all three pairwise comparisons. A [three-trial held-out evaluation](benchmark/comparison/REPORT-three-arm-0.2.md) reports measured detection, independent verification, retained-test validity, time and cost; the [one-trial pilot](benchmark/comparison/REPORT-three-arm-pilot.md) remains separate and exploratory.
 - Blind judging validates report coverage and retries an incomplete answer once. Verification now covers each planted report as well as non-planted issues, with inconclusive attempts kept separate. Retained tests for planted findings are replayed twice on the bug and once on clean code to measure validity and stability.
 
 ## 0.2.5 (2026-11-15)

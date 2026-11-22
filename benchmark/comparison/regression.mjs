@@ -52,7 +52,7 @@ export function regressionJobs(trials, judgments, results = RESULTS) {
       if (!trial || !finding || finding.status !== 'observed') continue;
       const trialDir = path.join(results, 'trials', id);
       const retained = trial.meta.arm === 'stillhunter' ? stillhunterTest(trialDir, finding.title) : mcpTest(trialDir, finding.title);
-      jobs.push({ feature, bug: trial.meta.bug, arm: trial.meta.arm, findingKey: report.key, key: `planted-${report.id}`, title: finding.title, ...retained });
+      jobs.push({ feature, bug: trial.meta.bug, arm: trial.meta.arm, lane: trial.meta.lane, findingKey: report.key, key: `planted-${report.id}`, title: finding.title, ...retained });
     }
   }
   return jobs;
@@ -130,6 +130,12 @@ async function seedFresh(repo, lane, feature) {
   }
 }
 
+export function copyMcpTestSuite(source, dest) {
+  mkdirSync(dest, { recursive: true });
+  cpSync(path.dirname(source), dest, { recursive: true });
+  cpSync(source, path.join(dest, 'test.mjs'));
+}
+
 async function openVariant(job, bug, lane, pluginDir, dest) {
   const work = path.join(process.env.BENCH_WORK, `regression-${job.feature}-${job.key}-${bug}`);
   rmSync(work, { recursive: true, force: true });
@@ -138,8 +144,7 @@ async function openVariant(job, bug, lane, pluginDir, dest) {
     cpSync(path.join(RESULTS, 'trials', job.findingKey.split('#')[0], 'stillhunter'), path.join(repo, '.stillhunter'), { recursive: true });
     writeResetConfig(repo, lane, job.feature, work);
   } else {
-    mkdirSync(path.join(work, 'tests'), { recursive: true });
-    cpSync(job.test.source, path.join(work, 'tests', 'test.mjs'));
+    copyMcpTestSuite(job.test.source, path.join(work, 'tests'));
     writeTestRuntime(work);
   }
   const stop = await startApp(repo, lane, path.join(dest, `app-${bug}.log`));
@@ -188,6 +193,18 @@ async function evaluateOne(job, lane, pluginDir) {
   return { ...result, wallMs: Date.now() - started };
 }
 
+export function assignRegressionLanes(jobs, lanes, offset = 0) {
+  const mcpLanes = Array.from({ length: lanes }, (_, i) => i + offset);
+  const shLanes = jobs.filter((job) => job.test?.kind === 'stillhunter').map((job) => job.lane);
+  const assigned = new Map([...new Set([...mcpLanes, ...shLanes])].map((lane) => [lane, []]));
+  let next = 0;
+  for (const job of jobs) {
+    const lane = job.test?.kind === 'stillhunter' ? job.lane : mcpLanes[next++ % mcpLanes.length];
+    assigned.get(lane).push(job);
+  }
+  return assigned;
+}
+
 async function main() {
   const lanes = Number(process.argv[2] ?? '2');
   const trials = scoredTrials();
@@ -200,11 +217,9 @@ async function main() {
   const needsPlugin = jobs.some((j) => j.test?.kind === 'stillhunter');
   const pluginDir = needsPlugin ? (process.env.BENCH_PLUGIN_DIR ? checkPluginDir(process.env.BENCH_PLUGIN_DIR) : preparePlugin().dir) : null;
   console.log(`${jobs.length} planted regression tests to evaluate (${jobs.filter((j) => !j.test).length} missing)`);
-  let next = 0;
-  await Promise.all(Array.from({ length: lanes }, async (_, i) => {
-    const lane = i + Number(process.env.BENCH_LANE_OFFSET ?? 0);
-    while (next < jobs.length) {
-      const job = jobs[next++];
+  const assigned = assignRegressionLanes(jobs, lanes, Number(process.env.BENCH_LANE_OFFSET ?? 0));
+  await Promise.all([...assigned].map(async ([lane, laneJobs]) => {
+    for (const job of laneJobs) {
       const file = path.join(RESULTS, 'regression', job.feature, `${job.key}.json`);
       if (existsSync(file)) continue;
       let result;

@@ -50,9 +50,9 @@ Judging retries an incomplete or inconsistent response once and records missing,
 
 For each observed planted finding, regression evaluation runs its retained test twice on the exact buggy variant and once on clean code. `valid` requires two assertion failures on the bug and a clean pass. Other outcomes distinguish missing, unstable, not-sensitive, wrong-expectation and inconclusive tests. This is an objective measure of planted-finding test validity, not a subjective readability review or a measure of tests for non-planted findings.
 
-Analysis reports recall with Wilson 95% intervals, precision, false alarms overall and on clean runs, planted reproduction, regression validity, time, token use and estimated cost. Paired recall uses an exact McNemar test and false-alarm counts a seeded permutation test. Source-modifying and incomplete runs remain visible. Precision excludes unjudged and unverified findings; `byClass` retains those counts, so do not read conditional precision as complete evaluation.
+Analysis reports recall, precision, planted reproduction and regression validity with Wilson 95% intervals, plus false alarms overall and on clean runs, time, token use and estimated cost. Paired recall uses an exact McNemar test and false-alarm counts a seeded permutation test. Source-modifying and incomplete runs remain visible. Precision excludes unjudged and unverified findings; `byClass` retains those counts, so do not read conditional precision as complete evaluation.
 
-The [0.2 held-out report](comparison/REPORT-heldout-0.2.md) is a two-arm historical measurement. The [three-arm pilot](comparison/REPORT-three-arm-pilot.md) is a separate one-trial exploratory measurement and predates the planted-reproduction and regression-replay harness above.
+The [0.2 held-out report](comparison/REPORT-heldout-0.2.md) is a two-arm historical measurement. The [three-arm evaluation](comparison/REPORT-three-arm-0.2.md) reports three trials per variant, including independent planted reproduction and retained-test replay. The [three-arm pilot](comparison/REPORT-three-arm-pilot.md) is a separate one-trial exploratory measurement and predates those checks; neither small evaluation establishes broad generalization.
 
 ## Port registry
 

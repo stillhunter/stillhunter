@@ -181,3 +181,36 @@ test('variant lifecycle closes the buggy app before opening clean and closes cle
   assert.equal(result.classification, 'valid');
   assert.deepEqual(events, ['open hx1', 'run hx1', 'run hx1', 'close hx1', 'open clean', 'run clean', 'close clean']);
 });
+
+
+test('MCP replay copies helper modules beside the selected test', (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'sh-regression-copy-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const tests = path.join(dir, 'source', 'tests');
+  mkdirSync(tests, { recursive: true });
+  writeFileSync(path.join(tests, 'one.mjs'), 'import "./helpers.mjs"; export default async function () {}');
+  writeFileSync(path.join(tests, 'helpers.mjs'), 'export const helper = true;');
+  const dest = path.join(dir, 'dest', 'tests');
+  return import('../benchmark/comparison/regression.mjs').then(({ copyMcpTestSuite }) => {
+    copyMcpTestSuite(path.join(tests, 'one.mjs'), dest);
+    assert.equal(readFileSync(path.join(dest, 'one.mjs'), 'utf8'), 'import "./helpers.mjs"; export default async function () {}');
+    assert.equal(readFileSync(path.join(dest, 'helpers.mjs'), 'utf8'), 'export const helper = true;');
+  });
+});
+
+test('regression scheduling preserves Stillhunter ports and serializes each lane', async () => {
+  const { assignRegressionLanes } = await import('../benchmark/comparison/regression.mjs');
+  const jobs = [
+    { key: 'mcp-one', test: { kind: 'mcp' } },
+    { key: 'sh-three', lane: 3, test: { kind: 'stillhunter' } },
+    { key: 'mcp-two', test: { kind: 'mcp' } },
+    { key: 'sh-zero', lane: 0, test: { kind: 'stillhunter' } },
+  ];
+  const assigned = assignRegressionLanes(jobs, 2, 5);
+  assert.deepEqual([...assigned].map(([lane, laneJobs]) => [lane, laneJobs.map((job) => job.key)]), [
+    [5, ['mcp-one']],
+    [6, ['mcp-two']],
+    [3, ['sh-three']],
+    [0, ['sh-zero']],
+  ]);
+});

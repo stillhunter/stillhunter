@@ -50,4 +50,10 @@ test('analysis reports planted reproduction separately from detection recall', (
   assert.equal(summary.per.adversarial.regressionTests.notSensitive, 1);
   assert.equal(summary.per.stillhunter.regressionTests.inconclusive, 1);
   assert.deepEqual(Object.fromEntries(summary.rows.map((r) => [r.arm, r.regression])), { playwright: 'valid', adversarial: 'not-sensitive', stillhunter: 'inconclusive' });
+  assert.ok(summary.per.playwright.precisionWilson95[0] > 0.2 && summary.per.playwright.precisionWilson95[0] < 0.21);
+  assert.equal(summary.per.playwright.precisionWilson95[1], 1);
+  assert.ok(summary.per.playwright.plantedReproduction.wilson95[0] > 0.2 && summary.per.playwright.plantedReproduction.wilson95[0] < 0.21);
+  assert.ok(summary.per.adversarial.plantedReproduction.wilson95[1] > 0.79 && summary.per.adversarial.plantedReproduction.wilson95[1] < 0.8);
+  assert.ok(summary.per.playwright.regressionTests.wilson95[0] > 0.2 && summary.per.playwright.regressionTests.wilson95[0] < 0.21);
+  assert.equal(summary.per.stillhunter.regressionTests.wilson95[0], 0);
 });
