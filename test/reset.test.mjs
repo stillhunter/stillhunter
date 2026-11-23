@@ -2,11 +2,13 @@
 // when it fails, and that a reset stopped at its time limit stops everything
 // it started, so nothing goes on changing app data after it.
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { readConfig } from '../dist/common.mjs';
 import { resetAndSignIn, resetApp } from '../dist/reset.mjs';
+import * as reset from '../dist/reset.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -17,6 +19,30 @@ test('a reset that works says nothing, and no reset runs nothing', async (t) => 
   assert.equal(await resetApp(dir, {}), null);
   assert.equal(await resetApp(dir, { reset: 'node ok.mjs' }), null);
   assert.ok(existsSync(path.join(dir, 'ran')), 'the reset ran in the repository root');
+});
+
+test('reset strategy selects start, hunt, proof and replay without enabling an absent reset', () => {
+  assert.equal(typeof reset.shouldReset, 'function');
+  const shouldReset = reset.shouldReset;
+  const always = { reset: { command: 'node reset.mjs', strategy: 'always' } };
+  const proof = { reset: { command: 'node reset.mjs', strategy: 'proof' } };
+  for (const phase of ['start', 'hunt', 'proof', 'replay']) {
+    assert.equal(shouldReset({}, phase), false, `no reset: ${phase}`);
+    assert.equal(shouldReset(always, phase), true, `always: ${phase}`);
+    assert.equal(shouldReset(proof, phase), phase === 'proof' || phase === 'replay', `proof: ${phase}`);
+  }
+});
+
+test('a normalized nonempty object reset executes in the repository root', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'sh-reset-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(path.join(dir, '.stillhunter'));
+  writeFileSync(path.join(dir, '.stillhunter', 'config.json'), JSON.stringify({ reset: { command: 'node object-reset.mjs', strategy: 'always' } }));
+  writeFileSync(path.join(dir, 'object-reset.mjs'), "import { writeFileSync } from 'node:fs';\nwriteFileSync('object-ran', 'x');\n");
+  const config = readConfig(dir);
+  assert.deepEqual(config.reset, { command: 'node object-reset.mjs', strategy: 'always' });
+  assert.equal(await resetApp(dir, config), null);
+  assert.ok(existsSync(path.join(dir, 'object-ran')), 'the object reset ran in the repository root');
 });
 
 test('a failed reset shows the command, how it ended and the end of what it printed, stderr first', async (t) => {
@@ -33,6 +59,19 @@ test('a failed reset shows the command, how it ended and the end of what it prin
 
 // On POSIX the reset leads its own process group; on Windows, taskkill stops
 // its process tree.
+test('controlled reset errors redact selected raw values from stdout, stderr and the command', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'sh-reset-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, 'leak.mjs'), "const text = 'Z credential-long'; if (process.argv[2] === 'stdout') process.stdout.write('out=' + text); else process.stderr.write('err=' + text); process.exit(2);\n");
+  for (const stream of ['stdout', 'stderr']) {
+    const error = await resetApp(dir, { reset: `node leak.mjs ${stream}` }, 120_000, ['Z', 'credential-long']);
+    assert.equal(error, `reset ("node leak.mjs ${stream}") failed: exit 2: ${stream === 'stdout' ? 'out' : 'err'}=[session value] [session value]`);
+  }
+  const command = await resetApp(dir, { reset: 'node credential-long.mjs' }, 120_000, ['credential-long']);
+  assert.ok(!command.includes('credential-long'), command);
+  assert.match(command, /\[session value\]/);
+});
+
 test('a reset past its time limit is stopped with every process it started', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'sh-reset-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

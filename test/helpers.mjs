@@ -1,8 +1,9 @@
 // Shared by the tests that drive the runner against the fixture app.
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
-import { tmpdir } from 'node:os';
+import { createServer as createHttpsServer } from 'node:https';
+import { networkInterfaces, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chooseBrowser, installedOnThisMachine } from '../dist/browser.mjs';
@@ -12,6 +13,7 @@ export const HUNT = path.join(ROOT, 'dist', 'hunt.mjs');
 const SERVER = path.join(ROOT, 'test', 'fixtures', 'app', 'server.mjs');
 
 export const SIGN_IN = { SHFIX_EMAIL: 'tester@example.com', SHFIX_PASSWORD: 'fixture-password-77' };
+export const CONFIGURED = { SHFIX_SHORT: 'Z', CUSTOM_TOKEN: 'configured-token-88' };
 export const DECOY = { SHFIX_SECRET_TOKEN: 'not-for-probes-1234' };
 
 export const browserChoice = chooseBrowser(null, installedOnThisMachine());
@@ -20,7 +22,22 @@ export const noBrowser = browserChoice.ok ? false : `no browser installed: ${bro
 export function hunt(args, { cwd, input, env } = {}) {
   return spawnSync(process.execPath, [HUNT, ...args], {
     cwd, input, encoding: 'utf8', timeout: 600_000, maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, ...SIGN_IN, ...DECOY, ...env },
+    env: { ...process.env, ...SIGN_IN, ...CONFIGURED, ...DECOY, ...env },
+  });
+}
+
+export function huntAsync(args, { cwd, input, env } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [HUNT, ...args], {
+      cwd, env: { ...process.env, ...SIGN_IN, ...CONFIGURED, ...DECOY, ...env }, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.once('error', reject);
+    child.once('close', (status) => resolve({ status, stdout, stderr }));
+    child.stdin.end(input);
   });
 }
 
@@ -58,6 +75,46 @@ export async function startFixture() {
   };
 }
 
+const TLS_CERT = path.join(ROOT, 'test', 'fixtures', 'tls', 'cert.pem');
+const TLS_KEY = path.join(ROOT, 'test', 'fixtures', 'tls', 'key.pem');
+
+export async function startTlsFixture() {
+  const externalHost = Object.values(networkInterfaces()).flat().find((i) => i?.family === 'IPv4' && !i.internal)?.address;
+  if (!externalHost) throw new Error('the local TLS fixture needs a non-loopback IPv4 interface');
+  const hits = { allowed: 0, wrongHost: 0, wrongPort: 0 };
+  const servers = [];
+  const listen = async (kind, host, port = 0) => {
+    const server = createHttpsServer({ cert: readFileSync(TLS_CERT), key: readFileSync(TLS_KEY) }, (req, res) => {
+      const served = req.headers.host?.startsWith('0.0.0.0:') ? 'wrongHost' : kind;
+      hits[served] += 1;
+      if (req.url === '/redirect') {
+        res.writeHead(302, { location: `https://0.0.0.0:${servers[0].address().port}/landed` });
+        res.end();
+      } else {
+        res.writeHead(200, { 'content-type': 'text/plain' });
+        res.end(served === 'allowed' ? 'allowed HTTPS' : 'unlisted decoy');
+      }
+    });
+    servers.push(server);
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
+    return server.address().port;
+  };
+  const port = await listen('allowed', '0.0.0.0');
+  const wrongPort = await listen('wrongPort', '0.0.0.0');
+  return {
+    url: `https://localhost.:${port}`,
+    externalUrl: `https://${externalHost}:${port}`,
+    wrongHostUrl: `https://0.0.0.0:${port}`,
+    wrongPortUrl: `https://${externalHost}:${wrongPort}`,
+    loopbackAliasWrongPortUrl: `https://localhost.:${wrongPort}`,
+    allowedHost: `localhost.:${port}`,
+    externalAllowedHost: `${externalHost}:${port}`,
+    certFile: TLS_CERT,
+    hits,
+    stop: async () => { await Promise.all(servers.map((s) => new Promise((r) => { s.close(r); s.closeAllConnections(); }))); },
+  };
+}
+
 const git = (cwd, ...args) => {
   const r = spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd, encoding: 'utf8' });
   if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
@@ -87,8 +144,8 @@ export function makeRepo(app, { change = true } = {}) {
 
 export const runIdOf = (stdout) => /stillhunter \| run (\d{8}-\d{6}-hunt-[a-z0-9]{4})/.exec(stdout)?.[1];
 
-export function probe(dir, runId, name, script) {
-  const r = hunt(['probe', '--run', runId, '--name', name], { cwd: dir, input: script });
+export function probe(dir, runId, name, script, env) {
+  const r = hunt(['probe', '--run', runId, '--name', name], { cwd: dir, input: script, env });
   let parsed = null;
   try { parsed = JSON.parse(r.stdout); } catch {}
   return { ...r, result: parsed };

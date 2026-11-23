@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { DECOY, hunt, makeRepo, noBrowser, probe, runIdOf, SIGN_IN, SIGNIN_PROBE, startFixture } from './helpers.mjs';
+import { CONFIGURED, DECOY, hunt, huntAsync, makeRepo, noBrowser, probe, runIdOf, SIGN_IN, SIGNIN_PROBE, startFixture, startTlsFixture } from './helpers.mjs';
 
 const LAYOUT = `export default async function (rr) {
   const p = await rr.newPage({ width: 375, height: 800 });
@@ -57,7 +57,7 @@ const GONE = `import fs from 'node:fs';
 export default async function (rr) {
   const n = fs.existsSync('gone-count') ? Number(fs.readFileSync('gone-count', 'utf8')) + 1 : 1;
   fs.writeFileSync('gone-count', String(n));
-  if (n > 1) throw new Error('the list was not there to check');
+  if (n > 1 || /[\\/]proof[\\/]/.test(process.cwd())) throw new Error('the list was not there to check');
   await rr.goto('/');
   rr.expect('list-has-three-items', false, 'two items listed');
   rr.expect('count-says-three', false, 'the count says 2');
@@ -68,7 +68,7 @@ const CRASHY = `import fs from 'node:fs';
 export default async function (rr) {
   const n = fs.existsSync('crashy-count') ? Number(fs.readFileSync('crashy-count', 'utf8')) + 1 : 1;
   fs.writeFileSync('crashy-count', String(n));
-  if (n === 2) process.exit(1);
+  if (/[\\/]proof[\\/]crashy\.1[\\/]scratch$/.test(process.cwd())) process.exit(1);
   await rr.goto('/');
   rr.expect('count-matches-list', false, 'summary says 2, list says 2, flagged anyway');
 }
@@ -97,7 +97,7 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 900_000 }
     { title: 'The summary bar runs off the screen at 375 px', severity: 'low', probe: 'layout', check: 'nothing-off-screen-at-375', where: '/' },
     { title: 'The coin answer is wrong', severity: 'medium', probe: 'flaky', check: 'coin-ok', where: 'GET /api/coin' },
     { title: 'The count does not match the list', severity: 'medium', probe: 'crashy', check: 'count-matches-list', where: '/' },
-    { title: 'A check on a typed value fails', severity: 'low', probe: 'literal', check: 'literal-check' },
+    { title: 'A check on a typed value fails', severity: 'low', probe: 'literal', check: 'literal-check', expected: `never store ${SIGN_IN.SHFIX_PASSWORD}`, [SIGN_IN.SHFIX_PASSWORD]: 'findings key' },
     // Claimed before the high claim on the same probe, so the report must sort them.
     { title: 'The count is one short', severity: 'medium', probe: 'gone', check: 'count-says-three', where: '/' },
     { title: 'The list is one item short', severity: 'high', probe: 'gone', check: 'list-has-three-items', where: '/' },
@@ -234,7 +234,7 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 900_000 }
     assert.match(first.stdout, /This is said once/);
 
     const resetsBefore = await app.resets();
-    const r = finish({ findings, dismissed, leads: [{ title: 'Maybe the count lags behind', why: 'could not make it happen' }] });
+    const r = finish({ findings, dismissed, leads: [{ title: 'Maybe the count lags behind', why: 'could not make it happen', [SIGN_IN.SHFIX_PASSWORD]: { nested: 'lead key' } }] });
     assert.equal(r.status, 0, r.stdout);
     // App data is reset before each re-run and each retry: two re-runs of
     // each of six probes, and one retry of crashy's first. (11 before gone
@@ -263,7 +263,11 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 900_000 }
     assert.match(report, /\nCould not re-run, not counted:\n- The list is one item short [^\n]*\n- The count is one short \(probe gone, expectation "count-says-three"\): re-run 1 never reached the check/);
     assert.match(report, /Dismissed:\n- misc \/ misc-a: probe-wrong: selector typo/);
     assert.match(report, /Unaccounted \(failed, neither claimed nor dismissed\):\n- misc \/ misc-b: left unexplained/);
+    assert.match(report, /expected: never store \[session value\]/);
+    assert.doesNotMatch(report, new RegExp(SIGN_IN.SHFIX_PASSWORD));
     const saved = JSON.parse(readFileSync(path.join(runDir(), 'findings.json'), 'utf8'));
+    assert.ok(!JSON.stringify(saved).includes(SIGN_IN.SHFIX_PASSWORD));
+    assert.equal(saved.confirmed.find((f) => f.probe === 'literal')['[session value]'], 'findings key');
     assert.deepEqual(saved.confirmed.map((f) => f.probe), ['empty', 'crashy', 'layout', 'literal']);
     assert.ok(saved.notes.some((n) => /^crashy re-run 1: .*retried once$/.test(n)), saved.notes.join('\n'));
     assert.equal(saved.confirmed[0].runs.length, 2);
@@ -274,7 +278,10 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 900_000 }
     // The sign-in went well, so nothing is said about it.
     assert.doesNotMatch(report, /After reset/);
     assert.equal(JSON.parse(readFileSync(path.join(runDir(), 'proof', 'empty.1.result.json'), 'utf8')).before.signIn.probe, 'signin');
-    assert.deepEqual(JSON.parse(readFileSync(path.join(runDir(), 'leads.json'), 'utf8')).map((l) => l.title), ['Maybe the count lags behind']);
+    const leads = JSON.parse(readFileSync(path.join(runDir(), 'leads.json'), 'utf8'));
+    assert.deepEqual(leads.map((l) => l.title), ['Maybe the count lags behind']);
+    assert.deepEqual(leads[0]['[session value]'], { nested: 'lead key' });
+    assert.ok(!JSON.stringify(leads).includes(SIGN_IN.SHFIX_PASSWORD));
     const proof = readdirSync(path.join(runDir(), 'proof'));
     for (const f of ['empty.1.result.json', 'empty.2.result.json', 'flaky.1.result.json', 'flaky.2.result.json', 'empty.1.signin.result.json', 'crashy.1.result.json', 'crashy.1.retry.result.json']) assert.ok(proof.includes(f), f);
     // The hunt's own latest results are never overwritten by the proof.
@@ -316,11 +323,12 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 900_000 }
     // folders (which hold a session) out of git.
     const gitignore = path.join(dir, '.stillhunter', '.gitignore');
     writeFileSync(gitignore, '/.env\n');
+    writeFileSync(path.join(dir, '.stillhunter', 'config.json'), JSON.stringify({ target: { url: app.url }, reset: 'node reset.mjs', auth: { env: ['SHFIX_EMAIL', 'SHFIX_PASSWORD', 'CUSTOM_TOKEN'] } }));
     // A kept test that throws before its expectation guards nothing, so it fails.
     const broken = path.join(dir, '.stillhunter', 'tests', 'throws-early');
     mkdirSync(broken);
     writeFileSync(path.join(broken, 'test.mjs'), "export default async function (rr) {\n  throw new Error('broke before the expectation');\n  rr.expect('never-reached', true);\n}\n");
-    writeFileSync(path.join(broken, 'test.json'), JSON.stringify({ check: 'never-reached', title: 'Throws before its expectation', severity: 'low', keptFrom: { run: runId, probe: 'x' } }));
+    writeFileSync(path.join(broken, 'test.json'), JSON.stringify({ check: 'never-reached', title: `Throws before its expectation ${CONFIGURED.CUSTOM_TOKEN}`, severity: 'low', keptFrom: { run: runId, probe: 'x' } }));
     const resetsBefore = await app.resets();
     const failing = hunt(['replay'], { cwd: dir });
     // App data is reset once before each kept test.
@@ -329,8 +337,15 @@ describe('a hunt against the fixture app', { skip: noBrowser, timeout: 900_000 }
     assert.equal(failing.status, 1, failing.stdout);
     assert.match(failing.stdout, /stillhunter \| replay \| 2 tests \| 0 passed, 2 failed/);
     assert.match(failing.stdout, /FAIL {2}items-load-error: A failed load is shown as an empty list \(expectation "load-failure-shown-as-error" fails: /);
-    assert.match(failing.stdout, /FAIL {2}throws-early: Throws before its expectation \(expectation "never-reached" not reached: Error: broke before the expectation/);
+    assert.match(failing.stdout, /FAIL {2}throws-early: Throws before its expectation \[session value\] \(expectation "never-reached" not reached: Error: broke before the expectation/);
+    assert.doesNotMatch(failing.stdout, new RegExp(CONFIGURED.CUSTOM_TOKEN));
     assert.doesNotMatch(failing.stdout, /sign-in failed/);
+    const configuredReplayDir = /^results: (.+)$/m.exec(failing.stdout)?.[1];
+    assert.ok(configuredReplayDir, failing.stdout);
+    const replayContextFile = path.join(dir, configuredReplayDir, 'context.json');
+    const replayContext = JSON.parse(readFileSync(replayContextFile, 'utf8'));
+    assert.deepEqual(replayContext.signInVariables, ['CUSTOM_TOKEN', 'SHFIX_EMAIL', 'SHFIX_PASSWORD']);
+    assert.ok(!readFileSync(replayContextFile, 'utf8').includes(CONFIGURED.CUSTOM_TOKEN));
 
     await app.post('/__fix');
     const passing = hunt(['replay', 'items-load-error'], { cwd: dir });
@@ -435,6 +450,46 @@ describe('the proof budget', { skip: noBrowser, timeout: 300_000 }, () => {
   });
 });
 
+describe('target authorization', { skip: noBrowser, timeout: 120_000 }, () => {
+  test('start refuses a non-loopback target omitted from hosts.allow and an allowlisted HTTP target', async () => {
+    const app = await startFixture();
+    const dir = makeRepo(app);
+    try {
+      const config = path.join(dir, '.stillhunter', 'config.json');
+      writeFileSync(config, JSON.stringify({ target: { url: 'https://localhost.:443' } }));
+      const omitted = hunt(['start'], { cwd: dir });
+      assert.equal(omitted.status, 1, omitted.stdout);
+      assert.match(omitted.stdout, /target must be loopback or an exact hosts.allow entry/);
+
+      writeFileSync(config, JSON.stringify({ target: { url: 'http://localhost.:443' }, hosts: { allow: ['localhost.:443'] } }));
+      const http = hunt(['start'], { cwd: dir });
+      assert.equal(http.status, 1, http.stdout);
+      assert.match(http.stdout, /target must be loopback or an exact hosts.allow entry/);
+    } finally {
+      app.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('start reaches an exact allowlisted HTTPS target and snapshots its allowlist', async () => {
+    const app = await startFixture();
+    const tls = await startTlsFixture();
+    const dir = makeRepo(app);
+    try {
+      writeFileSync(path.join(dir, '.stillhunter', 'config.json'), JSON.stringify({ target: { url: tls.url }, hosts: { allow: [tls.allowedHost] }, reset: 'node reset.mjs' }));
+      const r = await huntAsync(['start'], { cwd: dir, env: { NODE_EXTRA_CA_CERTS: tls.certFile } });
+      assert.equal(r.status, 0, r.stdout);
+      const runId = runIdOf(r.stdout);
+      const ctx = JSON.parse(readFileSync(path.join(dir, '.stillhunter', 'runs', runId, 'context.json'), 'utf8'));
+      assert.deepEqual(ctx.allowedHosts, [tls.allowedHost]);
+    } finally {
+      await tls.stop();
+      app.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('feature mode', { skip: noBrowser, timeout: 120_000 }, () => {
   test('with no change, start needs a focus and then tests that feature as it stands', async () => {
     const app = await startFixture();
@@ -475,7 +530,10 @@ describe('the reset at start', { skip: noBrowser, timeout: 120_000 }, () => {
       const runId = runIdOf(r.stdout);
       const p = probe(dir, runId, 'look', "export default async function (rr) {\n  await rr.goto('/login');\n  rr.expect('login-page', true);\n}\n").result;
       assert.equal(p.checks[0].pass, true, JSON.stringify(p));
-      assert.ok(!('before' in p) && !('warning' in p), JSON.stringify(p));
+      assert.equal(p.before.resetSeconds, 0);
+      assert.equal(p.before.resetError, null);
+      assert.equal(p.before.signIn, null);
+      assert.ok(!('warning' in p), JSON.stringify(p));
       assert.equal(await app.resets(), resets);
     } finally {
       app.stop();
@@ -530,7 +588,7 @@ export default async function (rr) {
 `).replace('  await rr.saveSession();\n', `  await rr.saveSession();\n${lines}`);
 // Saves its session on every run; from its second run on, a later step fails,
 // as one that goes on to read data would.
-const LATE_FAILING_SIGNIN = signinCounted('signin-count', "  if (n > 1) throw new Error('a later step of the sign-in probe failed');\n");
+const LATE_FAILING_SIGNIN = signinCounted('signin-count', "  if (n > 1 || /[\\\\/]proof[\\\\/]/.test(process.cwd())) throw new Error('a later step of the sign-in probe failed');\n");
 const ITEMS_LISTED = `export default async function (rr) {
   const r = await rr.request('GET', '/api/items');
   rr.expect('items-listed', r.status === 200, 'status ' + r.status);
@@ -547,7 +605,7 @@ const LATER = `import fs from 'node:fs';
 export default async function (rr) {
   const n = fs.existsSync('later-count') ? Number(fs.readFileSync('later-count', 'utf8')) + 1 : 1;
   fs.writeFileSync('later-count', String(n));
-  if (n > 1) throw new Error('the page was not there to check');
+  if (n > 1 || /[\\/]proof[\\/]/.test(process.cwd())) throw new Error('the page was not there to check');
   rr.expect('later-check', false, 'fails in the hunt');
 }
 `;
@@ -628,7 +686,7 @@ const FRAGILE_SIGNIN = SIGNIN_PROBE.replace('export default async function (rr) 
 export default async function (rr) {
   const n = fs.existsSync('signin-count') ? Number(fs.readFileSync('signin-count', 'utf8')) + 1 : 1;
   fs.writeFileSync('signin-count', String(n));
-  if (n > 2) throw new Error('the sign-in form was not there');
+  if (n > 2 || /[\\/]proof[\\/]/.test(process.cwd())) throw new Error('the sign-in form was not there');
 `);
 const NEEDS_SESSION = `export default async function (rr) {
   const r = await rr.request('GET', '/api/items');
@@ -679,6 +737,66 @@ describe('a sign-in that fails after a reset', { skip: noBrowser, timeout: 300_0
       assert.deepEqual(findings.dropped, []);
       assert.ok(findings.notes.some((n) => /^before needs 1: signing in again with "signin" failed: Error: the sign-in form was not there/.test(n)), findings.notes.join('\n'));
       assert.match(readFileSync(path.join(runDir, 'report.txt'), 'utf8'), /\nCould not re-run, not counted:\nAfter reset, the sign-in probe "signin" failed: Error: the sign-in form was not there.*\. Each claimed probe then ran signed out\.\n/);
+    } finally {
+      app.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+
+describe('schema-named credentials preserve the runner protocol', { skip: noBrowser, timeout: 180_000 }, () => {
+  test('probe results and finish findings keep fixed keys through keep', async () => {
+    const app = await startFixture();
+    const dir = makeRepo(app);
+    const env = {
+      SCHEMA_REQUESTS: 'requests',
+      SCHEMA_CHECKS: 'checks',
+      SCHEMA_ERROR: 'error',
+      SCHEMA_CONFIRMED: 'confirmed',
+      SCHEMA_TITLE: 'title',
+      SCHEMA_GENERATION: 'generation',
+    };
+    try {
+      const configFile = path.join(dir, '.stillhunter', 'config.json');
+      const config = JSON.parse(readFileSync(configFile, 'utf8'));
+      writeFileSync(configFile, JSON.stringify({ ...config, auth: { env: Object.keys(env) } }));
+      const started = hunt(['start', '--minutes', '3'], { cwd: dir, env });
+      const runId = runIdOf(started.stdout);
+      assert.ok(runId, started.stdout);
+      const runDir = path.join(dir, '.stillhunter', 'runs', runId);
+      const script = `export default async function (rr) {
+        rr.note('schema-map', { [process.env.SCHEMA_REQUESTS]: 'arbitrary' });
+        rr.expect('schema-check', false, 'failure');
+      }`;
+      const p = probe(dir, runId, 'schema', script, env);
+      assert.ok(p.result, p.stdout + p.stderr);
+      for (const key of ['checks', 'requests', 'error']) assert.ok(Object.hasOwn(p.result, key), `${key}: ${p.stdout}`);
+      assert.deepEqual(p.result.notes[0].value, { '[session value]': 'arbitrary' });
+      const savedResult = JSON.parse(readFileSync(path.join(runDir, 'probes', 'schema.result.json'), 'utf8'));
+      for (const key of ['checks', 'requests', 'error']) assert.ok(Object.hasOwn(savedResult, key), key);
+
+      const claims = { findings: [{ title: 'Schema finding', severity: 'high', probe: 'schema', check: 'schema-check' }], dismissed: [], leads: [] };
+      const finished = hunt(['finish', '--run', runId], { cwd: dir, input: JSON.stringify(claims), env });
+      assert.equal(finished.status, 0, finished.stdout);
+      const findings = JSON.parse(readFileSync(path.join(runDir, 'findings.json'), 'utf8'));
+      assert.ok(Object.hasOwn(findings, 'confirmed'));
+      assert.ok(Object.hasOwn(findings.confirmed[0], 'title'));
+      assert.equal(findings.proof.generation, 1);
+
+      assert.equal(probe(dir, runId, 'schema', script, env).result.checks[0].pass, false);
+      const finishedAgain = hunt(['finish', '--run', runId], { cwd: dir, input: JSON.stringify(claims), env });
+      assert.equal(finishedAgain.status, 0, finishedAgain.stdout);
+      const secondFindings = JSON.parse(readFileSync(path.join(runDir, 'findings.json'), 'utf8'));
+      assert.equal(secondFindings.proof.generation, 2);
+      writeFileSync(path.join(runDir, 'probes', 'schema.mjs'), '// overwritten live probe\n');
+      writeFileSync(path.join(runDir, 'proof', 'schema.mjs'), '// overwritten compatibility snapshot\n');
+      const kept = hunt(['keep', '--run', runId, '--probe', 'schema', '--check', 'schema-check', '--as', 'schema-kept'], { cwd: dir, env });
+      assert.equal(kept.status, 0, kept.stdout);
+      assert.equal(readFileSync(path.join(dir, '.stillhunter', 'tests', 'schema-kept', 'test.mjs'), 'utf8'), script);
+      const meta = JSON.parse(readFileSync(path.join(dir, '.stillhunter', 'tests', 'schema-kept', 'test.json'), 'utf8'));
+      assert.equal(meta.title, 'Schema finding');
+      assert.equal(meta.check, 'schema-check');
     } finally {
       app.stop();
       rmSync(dir, { recursive: true, force: true });

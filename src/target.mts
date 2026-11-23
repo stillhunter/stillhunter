@@ -5,7 +5,8 @@
 import { spawnSync } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
 import { readFileSync, realpathSync } from 'node:fs';
-import { request } from 'node:http';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import path from 'node:path';
 
 const DROPPED = new Set([
@@ -85,7 +86,7 @@ export function lockUrlPath(cwd: string): string {
 
 function fetchBytes(address: string, port: number, urlPath: string): Promise<Buffer | null> {
   return new Promise((resolve) => {
-    const req = request({ host: address, port, path: urlPath, headers: { host: `localhost:${port}` }, timeout: 3000 }, (res) => {
+    const req = httpRequest({ host: address, port, path: urlPath, headers: { host: `localhost:${port}` }, timeout: 3000 }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
       res.on('end', () => resolve(res.statusCode === 200 ? Buffer.concat(chunks) : null));
@@ -115,7 +116,8 @@ export function answers(url: string): Promise<number | null> {
   return new Promise((resolve) => {
     let req;
     try {
-      req = request(url, { method: 'GET', timeout: 3000 }, (res) => {
+      const transport = new URL(url).protocol === 'https:' ? httpsRequest : httpRequest;
+      req = transport(url, { method: 'GET', timeout: 3000 }, (res) => {
         res.resume();
         resolve(res.statusCode ?? null);
       });

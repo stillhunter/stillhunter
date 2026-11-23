@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Stillhunter's runner: the model reads the change, forms hypotheses and tests
 // them with probe scripts; the runner keeps the scripts, runs them in a
-// contained child process against a loopback-only browser and, at the end,
+// contained child process against an authorized-hosts-only browser and, at the end,
 // re-runs every claimed finding from scratch so only reproducible ones are
 // reported. Findings worth keeping become tests that replay with no model.
 //   stillhunter start [--depth quick|default|deep] [--minutes N] [--min-severity high|medium|low] [--focus "<text>"]
@@ -15,13 +15,13 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { chooseBrowser, installedOnThisMachine } from './browser.mjs';
 import { baseRef, changeList, changeText, collectChange, ensureRunsIgnored, fileDiff, readSpecs } from './change.mjs';
-import { block, brief, type Context, fail, FOLDER, flag, loadRun, PROBE_NAME, readConfig, readStdin, remaining, repoRoot, runsDir, signInVariableNames, stamp, findTargetUrl } from './common.mjs';
+import { allowedUrl, block, brief, type Context, credentialValues, fail, FOLDER, flag, loadRun, PROBE_NAME, readConfig, readStdin, redact, remaining, repoRoot, runsDir, signInVariableNames, stamp, findTargetUrl } from './common.mjs';
 import { finish } from './finish.mjs';
 import { parseStartFlags } from './flags.mjs';
 import { keep, replay } from './keep.mjs';
 import { runProbe, sessionPath } from './probe-host.mjs';
-import { resetAndSignIn, resetApp, seconds } from './reset.mjs';
-import { type Before, latestFile, nextRunNumber, numberedFile, probesDir, signInProbe } from './results.mjs';
+import { resetAndSignIn, resetApp, seconds, shouldReset } from './reset.mjs';
+import { type Before, lastSessionWriter, latestFile, nextRunNumber, numberedFile, probesDir, signInProbe } from './results.mjs';
 import { answers } from './target.mjs';
 
 const NO_CHANGE = 'No change found. Name a feature to hunt, for example: /stillhunter:hunt the checkout flow';
@@ -29,24 +29,28 @@ const NO_CHANGE = 'No change found. Name a feature to hunt, for example: /stillh
 async function start(args: string[]): Promise<void> {
   const root = repoRoot();
   const parsed = parseStartFlags(args);
-  if (!parsed.ok) fail(parsed.message);
+  if (!parsed.ok) fail(parsed.message, root);
   const { depth, minutes, minSeverity, focus } = parsed.flags;
   const base = baseRef(root);
   const change = collectChange(root, base);
-  if (change.empty && !focus) fail(NO_CHANGE);
+  if (change.empty && !focus) fail(NO_CHANGE, root);
   const config = readConfig(root);
+  const signInVariables = signInVariableNames(process.env, config.auth?.env);
+  const secrets = credentialValues(signInVariables);
+  const allowedHosts = Object.freeze([...(config.hosts?.allow ?? [])]);
   const target = await findTargetUrl(root, config);
-  if (!target) fail(`No running app found. Start your dev server, or set "target": { "url": ... } in ${FOLDER}/config.json.`);
-  if ((await answers(target)) === null) fail(`Nothing answers at ${target}. Start your dev server first.`);
+  if (!target) fail(`No running app found. Start your dev server, or set "target": { "url": ... } in ${FOLDER}/config.json.`, root);
+  if (!allowedUrl(target, target, allowedHosts)) fail('The target must be loopback or an exact hosts.allow entry; external targets must use HTTPS.', root);
+  if ((await answers(target)) === null) fail(redact(`Nothing answers at ${target}. Start your dev server first.`, secrets), root);
   const choice = chooseBrowser(config.browser ?? null, installedOnThisMachine());
-  if (!choice.ok) fail(choice.message);
+  if (!choice.ok) fail(choice.message, root);
 
-  // Every probe and every proof re-run starts from the reset, so a reset that
-  // does not work must stop the hunt here, not surface at finish. Its time
-  // counts against the budget like any other.
+  // Under always, every probe and proof starts from the reset, so a broken
+  // reset stops the hunt here rather than surfacing at finish. Its time counts
+  // against the budget. The proof strategy leaves start and hunt data alone.
   const now = Date.now();
-  const resetError = await resetApp(root, config);
-  if (resetError) fail(`The app's reset failed, so the hunt did not start: ${resetError}\nFix the reset ("reset" in ${FOLDER}/config.json, run in the repository root), then start again.`);
+  const resetError = shouldReset(config, 'start') ? await resetApp(root, config, undefined, secrets) : null;
+  if (resetError) fail(`The app's reset failed, so the hunt did not start: ${resetError}\nFix the reset ("reset" in ${FOLDER}/config.json, run in the repository root), then start again.`, root);
   const resetSeconds = seconds(Date.now() - now);
 
   const runId = `${stamp()}-hunt-${randomBytes(3).toString('hex').slice(0, 4)}`;
@@ -55,10 +59,9 @@ async function start(args: string[]): Promise<void> {
   ensureRunsIgnored(path.join(root, FOLDER, '.gitignore'));
 
   const mode = change.empty ? 'feature' : 'change';
-  const signInVariables = signInVariableNames();
   const ctx: Context = {
     runId, root, target, browser: choice.name, base, startedAt: now, deadline: now + minutes * 60_000,
-    depth, budgetMinutes: minutes, minSeverity, focus, mode, signInVariables,
+    depth, budgetMinutes: minutes, minSeverity, focus, mode, allowedHosts, signInVariables,
   };
   writeFileSync(path.join(dir, 'context.json'), JSON.stringify(ctx, null, 2) + '\n');
 
@@ -71,7 +74,9 @@ async function start(args: string[]): Promise<void> {
       ? `mode: feature. There is no change against the base, so this hunt tests "${focus}" as it stands.`
       : `mode: change. diff base: ${base.slice(0, 12)} (one file's whole diff: diff --file <file>)`,
     `sign-in variables set in the environment (names only): ${signInVariables.length ? signInVariables.join(', ') : 'none'}`,
-    ...(config.reset ? [`reset: app data is reset before every probe and every re-run, back to what the app holds now, and the sign-in probe then signs in again; the reset took ${resetSeconds} s`] : []),
+    ...(config.reset ? [shouldReset(config, 'start')
+      ? `reset: app data is reset before every probe and every re-run, back to what the app holds now, and the sign-in probe then signs in again; the reset took ${resetSeconds} s`
+      : 'reset: app data is reset before every proof re-run and every replayed test; start and hunt probes keep app data'] : []),
     'changed files:',
     ...(change.files.length ? change.files.map((l) => `  ${l}`) : ['  none']),
     `specs: ${specs.length ? specs.map((s) => s.file).join(', ') : 'none'}`,
@@ -80,7 +85,7 @@ async function start(args: string[]): Promise<void> {
     `=== the change: git diff ${base.slice(0, 12)} of tracked files, then every untracked file ===`,
     ...changeText(change),
   ];
-  process.stdout.write(block(lines));
+  process.stdout.write(block(redact(lines, secrets)));
 }
 
 // Plain words for what went wrong before the probe ran, said first in what
@@ -99,35 +104,41 @@ function beforeProblems(before: Before | null): string[] {
 async function probe(args: string[]): Promise<void> {
   const { ctx, dir, root } = loadRun(args);
   const name = flag(args, '--name');
-  if (!name || !PROBE_NAME.test(name)) fail('Give the probe a --name of lowercase letters, digits and dashes.');
+  if (!name || !PROBE_NAME.test(name)) fail('Give the probe a --name of lowercase letters, digits and dashes.', root);
   if (remaining(ctx) === 0) {
     process.stdout.write(block([`stillhunter | probe refused | run ${ctx.runId}`, 'The budget is spent. Call finish now, accounting for every failed check.']));
     process.exit(2);
   }
   const script = readStdin();
-  if (!/export\s+default/.test(script)) fail('The probe script on stdin needs `export default async function (rr) { ... }`.');
+  if (!/export\s+default/.test(script)) fail('The probe script on stdin needs `export default async function (rr) { ... }`.', root);
   const probeFile = path.join(probesDir(dir), `${name}.mjs`);
   writeFileSync(probeFile, script);
   const n = nextRunNumber(dir, name);
-  const run = (probeName: string, timeoutMs?: number) => runProbe({
+  const run = (probeName: string, timeoutMs?: number, setupShotsDir?: string) => runProbe({
     runDir: dir, probe: probeName, probeFile: path.join(probesDir(dir), `${probeName}.mjs`), target: ctx.target, browser: ctx.browser,
-    signInVariables: ctx.signInVariables, shotsDir: path.join(dir, 'shots'), timeoutMs,
+    allowedHosts: ctx.allowedHosts ?? [], signInVariables: ctx.signInVariables, shotsDir: setupShotsDir ?? path.join(dir, 'shots'), timeoutMs,
   });
-  // The same start the proof gives each re-run: app data reset, then signed
-  // in again by the run's sign-in probe, so what a probe finds is what finish
-  // can prove. The probe runs whatever went wrong, and says so.
+  // Under always, the same start the proof gives each re-run: app data reset,
+  // then signed in again by the run's sign-in probe. The probe runs whatever
+  // went wrong, and says so. Proof-only resets leave hunt data and scratch as
+  // is, but every result still records the sign-in selected before it ran.
   const config = readConfig(root);
-  const signIn = signInProbe(dir);
-  const before = config.reset
+  const signIn = shouldReset(config, 'hunt') ? signInProbe(dir) : lastSessionWriter(dir);
+  const recordedSignIn = signIn === name ? null : signIn;
+  const before = shouldReset(config, 'hunt')
     ? await resetAndSignIn({
-      root, config, probe: name, signIn, sessionFile: sessionPath(dir),
+      root, config, probe: name, signIn, sessionFile: sessionPath(dir), signInVariables: ctx.signInVariables,
       runSignIn: async (s, timeoutMs) => {
-        const r = await run(s, timeoutMs);
+        const r = await run(s, timeoutMs, path.join(dir, 'shots', `${name}.${n}.signin`));
         writeFileSync(path.join(probesDir(dir), `${name}.${n}.signin.result.json`), JSON.stringify(r, null, 2) + '\n');
         return r;
       },
     })
-    : null;
+    : {
+      resetSeconds: 0,
+      resetError: null,
+      signIn: recordedSignIn ? { probe: recordedSignIn, seconds: 0, error: null, savedSession: true } : null,
+    };
   const problems = beforeProblems(before);
   const result = await run(name);
   result.run = n;
@@ -161,7 +172,7 @@ async function probe(args: string[]): Promise<void> {
 function diff(args: string[]): void {
   const root = repoRoot();
   const file = flag(args, '--file');
-  if (args.length !== 0 && !(args.length === 2 && file)) fail('Usage: diff [--file <path>]');
+  if (args.length !== 0 && !(args.length === 2 && file)) fail('Usage: diff [--file <path>]', root);
   const base = baseRef(root);
   if (file === null) {
     const change = collectChange(root, base);
@@ -169,7 +180,7 @@ function diff(args: string[]): void {
     return;
   }
   const r = fileDiff(root, base, file);
-  if (!r.ok) fail(r.message);
+  if (!r.ok) fail(r.message, root);
   process.stdout.write(block([`stillhunter | diff | base ${base.slice(0, 12)} | ${file}`, r.text.replace(/\n$/, '') || '(no difference)']));
 }
 

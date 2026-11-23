@@ -1,15 +1,15 @@
 // finish: checks the hunter's claims, makes it account for every failed check
 // and for what it never covered, re-runs each claimed probe twice from scratch
 // and reports what reproduced.
-import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { claimProblems, type Dismissal, type Finding, type FinishInput, parseFinishInput, unaccounted, type Unaccounted } from './accounting.mjs';
-import { atOrAbove, block, brief, type Config, type Context, flag, FOLDER, loadRun, minutesAndSeconds, readConfig, readStdin, remaining, type Severity, severityOf } from './common.mjs';
+import { atOrAbove, block, brief, type Config, type Context, credentialValues, fail, flag, FOLDER, loadRun, minutesAndSeconds, readConfig, readStdin, redact, remaining, type Severity, severityOf } from './common.mjs';
 import { coverage, coverageLines } from './coverage.mjs';
 import { hiddenLine } from './flags.mjs';
-import { KILL_GRACE_MS, PROBE_TIMEOUT_MS, runProbe, sessionPath } from './probe-host.mjs';
-import { RESET_TIMEOUT_MS, resetAndSignIn, signedOut } from './reset.mjs';
-import { allResults, type Before, latestResults, outcome, type ProbeResult, probesDir, signInProbe } from './results.mjs';
+import { KILL_GRACE_MS, PROBE_TIMEOUT_MS, runProbe } from './probe-host.mjs';
+import { RESET_TIMEOUT_MS, resetAndSignIn, shouldReset, signedOut } from './reset.mjs';
+import { allResults, type Before, latestResults, outcome, type ProbeResult, probesDir } from './results.mjs';
 import { answers } from './target.mjs';
 
 export const COVERAGE_REFUSAL_SECONDS = 180;
@@ -41,8 +41,90 @@ function readState(dir: string): FinishState {
   }
 }
 
+export function reserveProofGeneration(dir: string): number {
+  const file = path.join(dir, 'proof-generation.json');
+  const proofDir = path.join(dir, 'proof');
+  const generationsDir = path.join(proofDir, 'generations');
+  let counted = 0;
+  const hasCounter = existsSync(file);
+  if (hasCounter) {
+    let saved: { generation?: unknown };
+    try {
+      saved = JSON.parse(readFileSync(file, 'utf8')) as { generation?: unknown };
+    } catch {
+      throw new Error(`${file} is malformed; existing proof evidence was left unchanged.`);
+    }
+    if (!saved || typeof saved.generation !== 'number' || !Number.isSafeInteger(saved.generation) || saved.generation < 0) {
+      throw new Error(`${file} must contain a safe non-negative integer generation; existing proof evidence was left unchanged.`);
+    }
+    counted = saved.generation;
+  }
+  let highest = 0;
+  if (existsSync(generationsDir)) {
+    for (const name of readdirSync(generationsDir)) {
+      if (!/^\d+$/.test(name)) continue;
+      const generation = Number(name);
+      if (!Number.isSafeInteger(generation)) throw new Error(`${path.join(generationsDir, name)} is not a safe proof generation; existing evidence was left unchanged.`);
+      highest = Math.max(highest, generation);
+    }
+  }
+  const unarchived = existsSync(proofDir) && readdirSync(proofDir).some((name) => name !== 'generations');
+  if (highest === 0 && unarchived) throw new Error(`Unarchived proof evidence exists under ${proofDir} without an archived generation; refusing to overwrite it.`);
+  const previous = Math.max(counted, highest);
+  if (previous >= Number.MAX_SAFE_INTEGER) throw new Error(`${file} has no safe next proof generation; existing evidence was left unchanged.`);
+  const generation = previous + 1;
+  mkdirSync(generationsDir, { recursive: true });
+  mkdirSync(path.join(generationsDir, String(generation)));
+  writeWhole(file, JSON.stringify({ generation }, null, 2) + '\n');
+  return generation;
+}
+
+const pidIsAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+
+export function acquireFinishLock(dir: string): () => void {
+  const lockDir = path.join(dir, 'finish.lock');
+  const ownerFile = path.join(lockDir, 'owner.json');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      mkdirSync(lockDir);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      let owner: { pid?: unknown } | null = null;
+      try {
+        owner = JSON.parse(readFileSync(ownerFile, 'utf8')) as { pid?: unknown };
+      } catch {}
+      if (owner && typeof owner.pid === 'number' && Number.isSafeInteger(owner.pid) && owner.pid > 0) {
+        if (pidIsAlive(owner.pid)) throw new Error(`Another finish (PID ${owner.pid}) is already running for this run. Wait for it to finish before calling finish again.`);
+        rmSync(lockDir, { recursive: true, force: true });
+        continue;
+      }
+      throw new Error(`The finish lock at ${lockDir} has no valid PID owner. It may belong to a finish that is just starting; if that is not the case, remove the lock directory and try again.`);
+    }
+    try {
+      writeWhole(ownerFile, JSON.stringify({ pid: process.pid }, null, 2) + '\n');
+    } catch (e) {
+      rmSync(lockDir, { recursive: true, force: true });
+      throw e;
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      rmSync(lockDir, { recursive: true, force: true });
+    };
+  }
+  throw new Error(`Could not acquire the finish lock at ${lockDir}.`);
+}
+
 function refuse(ctx: Context, lines: string[]): never {
-  process.stdout.write(block([`stillhunter | finish refused | run ${ctx.runId}`, ...lines]));
+  process.stdout.write(block(redact([`stillhunter | finish refused | run ${ctx.runId}`, ...lines], credentialValues(ctx.signInVariables))));
   process.exit(2);
 }
 
@@ -55,9 +137,9 @@ export function runTimeout(now: number, wallDeadline: number): number | null {
 }
 
 export function wallSeconds(env: NodeJS.ProcessEnv = process.env): number {
-  const value = env[WALL_ENV];
+  const value = Object.hasOwn(env, WALL_ENV) ? env[WALL_ENV] : undefined;
   const n = Number(value);
-  return value !== undefined && /^\d+$/.test(value) && n >= 1 && n < FINISH_WALL_SECONDS ? n : FINISH_WALL_SECONDS;
+  return typeof value === 'string' && /^\d+$/.test(value) && n >= 1 && n < FINISH_WALL_SECONDS ? n : FINISH_WALL_SECONDS;
 }
 
 // A file written whole or not at all: a finish stopped while writing leaves
@@ -79,6 +161,11 @@ export function writeWhole(file: string, text: string, rename: (from: string, to
   }
 }
 
+export function publishEvidence(archiveFile: string, latestFile: string, text: string, write: (file: string, text: string) => void = writeWhole): void {
+  write(archiveFile, text);
+  write(latestFile, text);
+}
+
 // Claimed probes in the order they are proved: by the most severe finding
 // each one carries, then in the order they were claimed.
 export function proofOrder(findings: Finding[]): string[] {
@@ -89,12 +176,14 @@ export function proofOrder(findings: Finding[]): string[] {
 
 interface Prover {
   dir: string;
+  proofDir: string;
+  generationDir: string;
+  generation: number;
   root: string;
   ctx: Context;
   config: Config;
-  // The hunt's latest result of each probe, and the run's sign-in probe.
+  // The hunt's latest result of each probe.
   latest: Map<string, ProbeResult>;
-  signIn: string | null;
   notes: string[];
   wallDeadline: number;
 }
@@ -102,25 +191,31 @@ interface Prover {
 // One re-run from scratch, or null when the wall deadline leaves no room for
 // it (or cut it short), so the probe counts as not re-run in time.
 async function proofRun(p: Prover, probe: string, label: string): Promise<ProbeResult | null> {
-  const proofDir = path.join(p.dir, 'proof');
-  const host = (name: string, timeoutMs: number) => runProbe({
-    runDir: p.dir, probe: name, probeFile: path.join(probesDir(p.dir), `${name}.mjs`), target: p.ctx.target, browser: p.ctx.browser,
-    signInVariables: p.ctx.signInVariables, shotsDir: path.join(proofDir, 'shots'), timeoutMs,
+  const attemptBase = p.generation === 1 ? p.proofDir : p.generationDir;
+  const attemptDir = path.join(attemptBase, `${probe}.${label}`);
+  const attemptScratch = path.join(attemptDir, 'scratch');
+  const host = (name: string, timeoutMs: number, probeFile: string, signInSetup = false) => runProbe({
+    runDir: p.dir, probe: name, probeFile, target: p.ctx.target, browser: p.ctx.browser,
+    allowedHosts: p.ctx.allowedHosts ?? [], signInVariables: p.ctx.signInVariables, scratchDir: attemptScratch, shotsDir: path.join(attemptDir, signInSetup ? 'signin-shots' : 'shots'), timeoutMs,
   });
-  const save = (r: ProbeResult, file: string) => { writeFileSync(path.join(proofDir, file), JSON.stringify(r, null, 2) + '\n'); return r; };
-  // App data and, with it, any session go back to the start, and the probe
-  // that signed in before the claimed probe's hunt run signs in again (none,
-  // if none did then), so the claimed probe starts as its hunt run did. A
-  // hunt run with no record of that falls back to the run's sign-in probe.
+  const save = (r: ProbeResult, file: string) => {
+    const text = JSON.stringify(r, null, 2) + '\n';
+    publishEvidence(path.join(p.generationDir, file), path.join(p.proofDir, file), text);
+    return r;
+  };
+  // Each attempt owns its scratch and shots. Reset app data when configured,
+  // then rerun the sign-in recorded by this probe's claimed hunt attempt;
+  // even without a reset this rebuilds the saved session in the fresh scratch.
   let before: Before | null = null;
-  if (p.config.reset) {
+  const huntStart = p.latest.get(probe)?.before;
+  const recordedSignIn = huntStart?.signIn?.probe ?? null;
+  if (shouldReset(p.config, 'proof') || recordedSignIn) {
     const resetMs = Math.min(RESET_TIMEOUT_MS, p.wallDeadline - Date.now() - KILL_GRACE_MS - RUN_MARGIN_MS - MIN_RUN_MS);
     if (resetMs <= 0) return null;
-    const huntStart = p.latest.get(probe)?.before;
     before = await resetAndSignIn({
-      root: p.root, config: p.config, probe, signIn: huntStart ? (huntStart.signIn?.probe ?? null) : p.signIn, sessionFile: sessionPath(p.dir), resetTimeoutMs: resetMs,
+      root: p.root, config: p.config, probe, signIn: recordedSignIn, sessionFile: path.join(attemptScratch, 'session.json'), resetTimeoutMs: resetMs, signInVariables: p.ctx.signInVariables,
       signInTimeoutMs: () => runTimeout(Date.now(), p.wallDeadline),
-      runSignIn: async (name, t) => save(await host(name, t), `${probe}.${label}.signin.result.json`),
+      runSignIn: async (name, t) => save(await host(name, t, path.join(p.generationDir, `${probe}.signin.mjs`), true), `${probe}.${label}.signin.result.json`),
     });
     if (!before) return null;
     const s = before.signIn;
@@ -129,7 +224,7 @@ async function proofRun(p: Prover, probe: string, label: string): Promise<ProbeR
   }
   const t = runTimeout(Date.now(), p.wallDeadline);
   if (t === null) return null;
-  const r = await host(probe, t);
+  const r = await host(probe, t, path.join(p.generationDir, `${probe}.mjs`));
   if (before) r.before = before;
   save(r, `${probe}.${label}.result.json`);
   // A run the deadline shortened and that then timed out says nothing about the bug.
@@ -233,7 +328,6 @@ export async function finish(args: string[]): Promise<void> {
 
   const state = readState(dir);
   const missing = unaccounted(input, latest);
-  const signIn = signInProbe(dir);
   const cov = coverage(allResults(dir), ctx.target);
   const left = remaining(ctx);
   const refusal: string[] = [];
@@ -258,33 +352,61 @@ export async function finish(args: string[]): Promise<void> {
     refuse(ctx, [...refusal, 'This is said once; the next finish accepts and records what is still open.']);
   }
 
-  writeFileSync(path.join(dir, 'leads.json'), JSON.stringify(input.leads, null, 2) + '\n');
-  const config = readConfig(root);
-  mkdirSync(path.join(dir, 'proof'), { recursive: true });
-  const proofDeadline = startedAt + budget * 1000;
-  const prover: Prover = { dir, root, ctx, config, latest, signIn, notes: [], wallDeadline: startedAt + wallSeconds() * 1000 };
-  const order = proofOrder(input.findings);
-  const byProbe = new Map<string, ProbeResult[]>();
-  const settle = (complete: boolean) => writeReport({ ctx, dir, input, missing, cov, latest, byProbe, notes: prover.notes, startedAt, budget, wall: wallSeconds(), order, complete });
-  // Most severe first, and the report is written before the proof and again
-  // after every proved probe, so a finish that is stopped part way still
-  // leaves its findings.
-  settle(false);
-  for (const probe of order) {
-    if (Date.now() >= proofDeadline) break;
-    // Snapshot the exact script being proved, so keep saves the probe that was
-    // confirmed even if it is later re-run under the same name.
-    copyFileSync(path.join(probesDir(dir), `${probe}.mjs`), path.join(dir, 'proof', `${probe}.mjs`));
-    const runs = await prove(prover, probe);
-    if (runs) byProbe.set(probe, runs);
-    settle(false);
+  let release: () => void;
+  try {
+    release = acquireFinishLock(dir);
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e), root);
   }
-  process.stdout.write(block(settle(true)));
+  let generation: number;
+  try {
+    generation = reserveProofGeneration(dir);
+  } catch (e) {
+    release();
+    fail(e instanceof Error ? e.message : String(e), root);
+  }
+  const proofDir = path.join(dir, 'proof');
+  const generationDir = path.join(proofDir, 'generations', String(generation));
+  try {
+    const leads = JSON.stringify(redact(input.leads, credentialValues(ctx.signInVariables)), null, 2) + '\n';
+    publishEvidence(path.join(generationDir, 'leads.json'), path.join(dir, 'leads.json'), leads);
+    const config = readConfig(root);
+    const proofDeadline = startedAt + budget * 1000;
+    const prover: Prover = { dir, proofDir, generationDir, generation, root, ctx, config, latest, notes: [], wallDeadline: startedAt + wallSeconds() * 1000 };
+    const order = proofOrder(input.findings);
+    const byProbe = new Map<string, ProbeResult[]>();
+    const settle = (complete: boolean) => writeReport({ ctx, dir, generationDir, generation, input, missing, cov, latest, byProbe, notes: prover.notes, startedAt, budget, wall: wallSeconds(), order, complete });
+    // Most severe first, and the report is written before the proof and again
+    // after every proved probe, so a finish that is stopped part way still
+    // leaves its findings.
+    settle(false);
+    for (const probe of order) {
+      if (Date.now() >= proofDeadline) break;
+      // Snapshot the exact script being proved, so keep saves the probe that was
+      // confirmed even if it is later re-run under the same name.
+      const snapshot = readFileSync(path.join(probesDir(dir), `${probe}.mjs`), 'utf8');
+      publishEvidence(path.join(generationDir, `${probe}.mjs`), path.join(proofDir, `${probe}.mjs`), snapshot);
+      const setup = { signIn: latest.get(probe)?.before?.signIn?.probe ?? null };
+      publishEvidence(path.join(generationDir, `${probe}.setup.json`), path.join(proofDir, `${probe}.setup.json`), JSON.stringify(setup, null, 2) + '\n');
+      if (setup.signIn) {
+        const setupSnapshot = readFileSync(path.join(probesDir(dir), `${setup.signIn}.mjs`), 'utf8');
+        publishEvidence(path.join(generationDir, `${probe}.signin.mjs`), path.join(proofDir, `${probe}.signin.mjs`), setupSnapshot);
+      }
+      const runs = await prove(prover, probe);
+      if (runs) byProbe.set(probe, runs);
+      settle(false);
+    }
+    process.stdout.write(block(settle(true)));
+  } finally {
+    release();
+  }
 }
 
 interface ReportInput {
   ctx: Context;
   dir: string;
+  generationDir: string;
+  generation: number;
   input: FinishInput;
   missing: Unaccounted[];
   cov: ReturnType<typeof coverage>;
@@ -327,8 +449,11 @@ function writeReport(r: ReportInput): string[] {
   const shownNotRerun = notRerun.filter((f) => atOrAbove(f.severity, ctx.minSeverity));
   const erred = [...r.latest].filter(([, x]) => x.error).map(([name, x]) => `${name}: ${x.error}`);
   const finishSeconds = Math.round((Date.now() - r.startedAt) / 1000);
-  const proof = { budgetSeconds: r.budget, wallLimitSeconds: r.wall, finishSeconds, complete: r.complete, order: r.order, proved: [...r.byProbe.keys()] };
-  writeWhole(path.join(dir, 'findings.json'), JSON.stringify({ confirmed, intermittent, dropped, notRerunnable, notRerun, dismissed: input.dismissed, unaccounted: missing, coverage: cov, notes: r.notes, proof }, null, 2) + '\n');
+  const proof = { generation: r.generation, budgetSeconds: r.budget, wallLimitSeconds: r.wall, finishSeconds, complete: r.complete, order: r.order, proved: [...r.byProbe.keys()] };
+  const secrets = credentialValues(ctx.signInVariables);
+  const findings = redact({ confirmed, intermittent, dropped, notRerunnable, notRerun, dismissed: input.dismissed, unaccounted: missing, coverage: cov, notes: r.notes, proof }, secrets, 'findings');
+  const findingsText = JSON.stringify(findings, null, 2) + '\n';
+  publishEvidence(path.join(r.generationDir, 'findings.json'), path.join(dir, 'findings.json'), findingsText);
 
   const reportPath = `${FOLDER}/runs/${ctx.runId}/report.txt`;
   const elapsed = Math.round((Date.now() - ctx.startedAt) / 1000);
@@ -341,7 +466,7 @@ function writeReport(r: ReportInput): string[] {
     ...(f.where ? [`   where: ${f.where}`] : []),
     ...(f.expected ? [`   expected: ${f.expected}`] : []),
     `   saw: ${f.runs[0] ?? f.actual ?? ''}`,
-    `   repro: ${FOLDER}/runs/${ctx.runId}/probes/${f.probe}.mjs (expectation "${f.check}")`,
+    `   repro: ${FOLDER}/runs/${ctx.runId}/proof/generations/${r.generation}/${f.probe}.mjs (expectation "${f.check}")`,
   ]);
   const listBlock = (title: string, list: Unconfirmed[], why = false) => (list.length
     ? ['', `${title}:`, ...list.map((f) => `- ${f.title} (probe ${f.probe}, expectation "${f.check}")${why ? `: ${f.why}` : ''}`)]
@@ -386,8 +511,9 @@ function writeReport(r: ReportInput): string[] {
     `Proof: ${r.byProbe.size} of ${r.order.length} claimed probes re-run in ${finishSeconds} s (budget ${r.budget} s)${r.complete ? '' : '; finish had not ended when this was written'}`,
     `Leads (not tested to proof): ${input.leads.length}, in ${FOLDER}/runs/${ctx.runId}/leads.json`,
   ];
-  writeWhole(path.join(dir, 'report.txt'), full.join('\n') + '\n');
-  return printed;
+  const reportText = redact(full.join('\n') + '\n', secrets);
+  publishEvidence(path.join(r.generationDir, 'report.txt'), path.join(dir, 'report.txt'), reportText);
+  return redact(printed, secrets);
 }
 
 const dismissalLine = (d: Dismissal) => `- ${d.probe} / ${d.check}: ${d.reason}${d.duplicateOf ? ` of "${d.duplicateOf}"` : ''}${d.why ? `: ${d.why}` : ''}`;

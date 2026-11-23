@@ -28,13 +28,14 @@ function parse(url: string, target: string): URL | null {
   }
 }
 
-// A request the loopback-only route let through, so it reached the app (the
+// A request the authorized-hosts-only route let through, so it reached the app (the
 // target origin or another loopback port). A page call to a tracker or
 // analytics host was aborted before it reached anything, so it is not coverage
 // of the app and must not feed "seen but never faulted".
 function reachesApp(url: string, target: string): boolean {
   const u = parse(url, target);
-  return Boolean(u && (LOOPBACK.has(u.hostname) || u.hostname.endsWith('.localhost')));
+  const t = parse(target, target);
+  return Boolean(u && ((t && u.origin === t.origin) || LOOPBACK.has(u.hostname) || u.hostname.endsWith('.localhost')));
 }
 
 export function foldPath(pathname: string): string {

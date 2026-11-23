@@ -6,15 +6,29 @@ import { test } from 'node:test';
 import { allowedUrl, refusal } from '../dist/relay.mjs';
 
 const target = 'http://127.0.0.1:3000';
-const ask = (type, method, params = {}) => refusal(type, { id: 'a@1', guid: 'x', method, params }, target);
-const allowed = (type, method, params) => assert.equal(ask(type, method, params), null, `${type}.${method} ${JSON.stringify(params)}`);
-const refused = (type, method, params, pattern = /./) => assert.match(String(ask(type, method, params)), pattern, `${type}.${method} ${JSON.stringify(params)}`);
+const ask = (type, method, params = {}, hosts = []) => refusal(type, { id: 'a@1', guid: 'x', method, params }, target, hosts);
+const allowed = (type, method, params, hosts = []) => assert.equal(ask(type, method, params, hosts), null, `${type}.${method} ${JSON.stringify(params)}`);
+const refused = (type, method, params, pattern = /./, hosts = []) => assert.match(String(ask(type, method, params, hosts)), pattern, `${type}.${method} ${JSON.stringify(params)}`);
 
 test('only http and https URLs on loopback hosts are allowed, relative ones against the target', () => {
   for (const u of ['/login', 'login?x=1', 'http://localhost:5173/a', 'https://127.0.0.1/', 'http://[::1]:8000/', 'http://app.localhost/']) assert.ok(allowedUrl(u, target), u);
-  for (const u of ['file:///etc/hosts', ' file:///etc/hosts', 'data:text/html,hi', 'about:blank', 'chrome://version', 'view-source:http://127.0.0.1/', 'ws://127.0.0.1/', 'http://192.0.2.1/', '//example.com/x', '\\\\example.com\\x', 'http://127.0.0.1.example.com/', 'http://localhost.example.com/', 42, undefined]) {
+  for (const u of ['file:///etc/hosts', ' file:///etc/hosts', 'data:text/html,hi', 'about:blank', 'chrome://version', 'view-source:http://127.0.0.1/', 'ws://127.0.0.1/', 'http://192.0.2.1/', '//example.com/x', '\\\\example.com\\x', 'http://127.0.0.1.example.com/', 'http://localhost.example.com/', 'http://user:pass@localhost:5173/', 42, undefined]) {
     assert.ok(!allowedUrl(u, target), String(u));
   }
+});
+
+test('an external URL needs HTTPS and an exact case-insensitive host and normalized port allowlist entry', () => {
+  for (const entry of ['example.com', 'EXAMPLE.COM:443']) {
+    for (const u of ['https://example.com/', 'https://EXAMPLE.COM:443/a', 'https://example.com:443/a']) assert.ok(allowedUrl(u, target, [entry]), `${entry}: ${u}`);
+    assert.ok(allowedUrl('/relative', 'https://example.com', [entry]), entry);
+  }
+  assert.ok(allowedUrl('https://example.com:8443/', target, ['EXAMPLE.COM:8443']));
+  for (const u of ['http://example.com/', 'https://example.com:444/', 'https://sub.example.com/', 'https://badexample.com/', 'https://example.com.evil.test/', 'https://user:pass@example.com/']) {
+    assert.ok(!allowedUrl(u, target, ['example.com']), u);
+  }
+  assert.ok(!allowedUrl('https://sub.example.com/', target, ['*.example.com']));
+  assert.ok(!allowedUrl('https://example.com/', target, ['example.com:444']));
+  assert.ok(!allowedUrl('https://example.com/', target), 'the target argument alone grants no external access');
 });
 
 test('CDP sessions, launching, connecting and the other ways out are refused', () => {
@@ -48,8 +62,8 @@ test('a context needs a loopback base URL and may not set its own proxy, video o
   allowed('BrowserContext', 'setStorageState', { storageState: state('http://localhost:5173') });
   allowed('BrowserContext', 'setStorageState', { storageState: { cookies: [] } });
   for (const origin of ['file:///Users/me/.ssh', 'http://192.0.2.1', 'chrome://settings', undefined]) {
-    refused('Browser', 'newContext', { baseURL: target, storageState: state(origin) }, /loopback http or https origins/);
-    refused('BrowserContext', 'setStorageState', { storageState: state(origin) }, /loopback http or https origins/);
+    refused('Browser', 'newContext', { baseURL: target, storageState: state(origin) }, /loopback or exact allowlisted http or https origins/);
+    refused('BrowserContext', 'setStorageState', { storageState: state(origin) }, /loopback or exact allowlisted http or https origins/);
   }
   refused('BrowserContext', 'setStorageState', { storageState: { origins: 'file:///' } }, /must be a list/);
   refused('BrowserContext', 'grantPermissions', { permissions: ['camera'] });
@@ -72,6 +86,21 @@ test('navigation, route changes and host-side requests stay on loopback http', (
   allowed('APIRequestContext', 'fetch', { url: `${target}/api/x`, method: 'GET', maxRedirects: 0 });
   refused('APIRequestContext', 'fetch', { url: 'http://192.0.2.1/', maxRedirects: 0 });
   refused('APIRequestContext', 'fetch', { url: `${target}/api/x` }, /redirects/);
+});
+
+test('the allowlist covers contexts, storage, navigation, route changes and host-side requests', () => {
+  const hosts = ['example.com:443'];
+  const url = 'https://example.com/';
+  const state = { cookies: [], origins: [{ origin: url, localStorage: [] }] };
+  allowed('Browser', 'newContext', { baseURL: url, storageState: state }, hosts);
+  allowed('BrowserContext', 'setStorageState', { storageState: state }, hosts);
+  allowed('Frame', 'goto', { url }, hosts);
+  allowed('Route', 'continue', { url }, hosts);
+  allowed('Route', 'redirectNavigationRequest', { url }, hosts);
+  allowed('APIRequestContext', 'fetch', { url, maxRedirects: 0 }, hosts);
+  refused('Frame', 'goto', { url: 'https://wrong.example.com/' }, /loopback host or exact allowlisted/, hosts);
+  refused('Frame', 'goto', { url: 'https://example.com:444/' }, /loopback host or exact allowlisted/, hosts);
+  refused('APIRequestContext', 'fetch', { url: 'http://example.com/', maxRedirects: 0 }, /loopback host or exact allowlisted/, hosts);
 });
 
 test('files reach a page as bytes from the probe, never as host paths or streams', () => {

@@ -13,29 +13,15 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { createRequire } from 'node:module';
 import type { Duplex } from 'node:stream';
+import { allowedUrl } from './common.mjs';
 
+export { allowedUrl } from './common.mjs';
 export const REFUSED = 'refused by the browser relay';
 const MAX_PAYLOAD = 256 * 1024 * 1024;
 const MAX_KEPT = 20;
 
 type Params = Record<string, unknown>;
 export interface ClientMessage { id?: unknown; guid?: unknown; method?: unknown; params?: unknown }
-
-const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
-
-// An http or https URL on a loopback host. A relative URL resolves against the
-// target, as the server resolves it against the context's baseURL, which is
-// itself held to a loopback http or https URL below.
-export function allowedUrl(url: unknown, target: string): boolean {
-  if (typeof url !== 'string') return false;
-  try {
-    const u = new URL(url, target);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-    return LOOPBACK.has(u.hostname) || u.hostname.endsWith('.localhost');
-  } catch {
-    return false;
-  }
-}
 
 // Context options that change only what happens inside the browser. Left out
 // on purpose: proxy (its own way out), recordVideo (the server writes files on
@@ -57,26 +43,26 @@ const PERMISSIONS = new Set([
 // or streams the server would read from the host's disk.
 const FILE_KEYS = new Set(['selector', 'strict', 'payloads', 'position', 'data', 'timeout']);
 
-type Check = (params: Params, target: string) => string | null;
+type Check = (params: Params, target: string, allowedHosts: readonly string[]) => string | null;
 
 const keysOutside = (params: Params, allowed: Set<string>) => Object.keys(params).filter((k) => params[k] !== undefined && !allowed.has(k));
 
 // The server opens a page at each origin a storage state lists to restore
 // its storage, so every origin is held to the same rule as a navigation.
-const storageState = (state: unknown, target: string): string | null => {
+const storageState = (state: unknown, target: string, allowedHosts: readonly string[]): string | null => {
   if (state === undefined || state === null) return null;
   const origins = typeof state === 'object' ? (state as { origins?: unknown }).origins : undefined;
   if (origins === undefined) return null;
   if (!Array.isArray(origins)) return 'a storage state\'s origins must be a list';
-  const bad = origins.map((o) => (o && typeof o === 'object' ? (o as { origin?: unknown }).origin : o)).filter((o) => !allowedUrl(o, target));
-  return bad.length ? `a storage state may hold only loopback http or https origins, not ${bad.map((o) => String(o).slice(0, 120)).join(', ')}` : null;
+  const bad = origins.map((o) => (o && typeof o === 'object' ? (o as { origin?: unknown }).origin : o)).filter((o) => !allowedUrl(o, target, allowedHosts));
+  return bad.length ? `a storage state may hold only loopback or exact allowlisted http or https origins, not ${bad.map((o) => String(o).slice(0, 120)).join(', ')}` : null;
 };
 
-const contextOptions: Check = (p, target) => {
+const contextOptions: Check = (p, target, allowedHosts) => {
   const extra = keysOutside(p, CONTEXT_OPTIONS);
   if (extra.length) return `a context may not set ${extra.join(', ')}; pages come from rr.newPage()`;
-  if (!allowedUrl(p.baseURL, target)) return 'a context needs a loopback http or https baseURL';
-  return storageState(p.storageState, target) ?? permissions(p, target);
+  if (!allowedUrl(p.baseURL, target, allowedHosts)) return 'a context needs a loopback or exact allowlisted http or https baseURL';
+  return storageState(p.storageState, target, allowedHosts) ?? permissions(p, target, allowedHosts);
 };
 const permissions: Check = (p) => {
   const list = Array.isArray(p.permissions) ? p.permissions : [];
@@ -87,11 +73,11 @@ const files: Check = (p) => {
   const extra = keysOutside(p, FILE_KEYS);
   return extra.length ? `files must be given as bytes, not as ${extra.join(', ')} on the host` : null;
 };
-const url = (key: string, optional: boolean): Check => (p, target) => {
+const url = (key: string, optional: boolean): Check => (p, target, allowedHosts) => {
   if (optional && p[key] === undefined) return null;
-  return allowedUrl(p[key], target) ? null : `${String(p[key]).slice(0, 120)} is not an http or https URL on a loopback host`;
+  return allowedUrl(p[key], target, allowedHosts) ? null : `${String(p[key]).slice(0, 120)} is not an http or https URL on a loopback host or exact allowlisted authority`;
 };
-const fetchCheck: Check = (p, target) => url('url', false)(p, target) ?? (p.maxRedirects === 0 ? null : 'a request from the host follows no redirects: use rr.request');
+const fetchCheck: Check = (p, target, allowedHosts) => url('url', false)(p, target, allowedHosts) ?? (p.maxRedirects === 0 ? null : 'a request from the host follows no redirects: use rr.request');
 
 const ALL = null;
 type Rules = Record<string, Check | typeof ALL>;
@@ -110,7 +96,7 @@ export const ALLOWED: Record<string, Rules> = {
   BrowserContext: names(`addCookies addInitScript clearCookies clearPermissions clockFastForward clockInstall clockPauseAt clockResume
     clockRunFor clockSetFixedTime clockSetSystemTime close cookies exposeBinding newPage registerSelectorEngine setExtraHTTPHeaders
     setGeolocation setHTTPCredentials setNetworkInterceptionPatterns setOffline setTestIdAttributeName
-    setWebSocketInterceptionPatterns storageState updateSubscription`, { grantPermissions: permissions, setStorageState: (p, target) => storageState(p.storageState, target) }),
+    setWebSocketInterceptionPatterns storageState updateSubscription`, { grantPermissions: permissions, setStorageState: (p, target, allowedHosts) => storageState(p.storageState, target, allowedHosts) }),
   Page: names(`addInitScript bringToFront clearConsoleMessages clearPageErrors close consoleMessages emulateMedia expectScreenshot
     exposeBinding goBack goForward keyboardDown keyboardInsertText keyboardPress keyboardType keyboardUp mouseClick mouseDown mouseMove
     mouseUp mouseWheel pageErrors pdf registerLocatorHandler reload requestGC requests resolveLocatorHandlerNoReply runBeforeUnload
@@ -144,7 +130,7 @@ const CONNECTION_METHODS = new Set(['__waitInfo__', '__abort__']);
 const unanswered = (method: string) => method.endsWith('NoReply') || CONNECTION_METHODS.has(method);
 
 // Why a message from the child is refused, or null when it may go on.
-export function refusal(type: string | undefined, message: ClientMessage, target: string): string | null {
+export function refusal(type: string | undefined, message: ClientMessage, target: string, allowedHosts: readonly string[] = []): string | null {
   const method = String(message.method);
   if (type === undefined) return `${method} on an object the server never created`;
   // The connection's own bookkeeping, sent for any object: what a pending call
@@ -154,7 +140,7 @@ export function refusal(type: string | undefined, message: ClientMessage, target
   if (!rules || !Object.hasOwn(rules, method)) return `${type}.${method} is not available to a probe`;
   const check = rules[method];
   const params = message.params && typeof message.params === 'object' ? (message.params as Params) : {};
-  const why = check ? check(params, target) : null;
+  const why = check ? check(params, target, allowedHosts) : null;
   return why ? `${type}.${method}: ${why}` : null;
 }
 
@@ -185,7 +171,7 @@ export interface Relay {
 
 // Serves a WebSocket on loopback, at a path only the child is told, and relays
 // each connection to the browser server's endpoint, checking every message.
-export async function startRelay(upstream: string, target: string): Promise<Relay> {
+export async function startRelay(upstream: string, target: string, allowedHosts: readonly string[] = []): Promise<Relay> {
   const path = `/${randomBytes(16).toString('hex')}`;
   const refused: string[] = [];
   const sockets = new Set<Socket>();
@@ -222,7 +208,7 @@ export async function startRelay(upstream: string, target: string): Promise<Rela
         return end();
       }
       if (!m || typeof m !== 'object' || typeof m.guid !== 'string' || typeof m.method !== 'string') return end();
-      const why = refusal(types.get(m.guid), m, target);
+      const why = refusal(types.get(m.guid), m, target, allowedHosts);
       if (!why) {
         if (server.readyState === WebSocket.OPEN) server.send(text);
         else queue.push(text);

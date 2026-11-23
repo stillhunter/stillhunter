@@ -57,6 +57,23 @@ test('page calls to non-loopback hosts the route blocked are not endpoints', () 
   assert.deepEqual(c.neverFaulted, ['GET /api/items', 'GET 127.0.0.1:8000/api/other']);
 });
 
+test('an external target keeps same-origin API coverage and faults without counting other hosts or assets', () => {
+  const target = 'https://app.example.com';
+  const c = coverage([{
+    requests: [
+      { method: 'GET', url: `${target}/api/items`, via: 'page' },
+      { method: 'POST', url: `${target}/api/items`, via: 'page' },
+      { method: 'GET', url: `${target}/_nuxt/app.vue`, via: 'page' },
+      { method: 'GET', url: `${target}/assets/logo.svg`, via: 'page' },
+      { method: 'POST', url: 'https://analytics.example.com/collect', via: 'page' },
+    ],
+    faults: [{ method: 'GET', url: `${target}/api/items`, fault: '500' }],
+    pages: [],
+  }], target);
+  assert.deepEqual(c.endpoints, [{ endpoint: 'GET /api/items', faults: ['500'] }, { endpoint: 'POST /api/items', faults: [] }]);
+  assert.deepEqual(c.neverFaulted, ['POST /api/items']);
+});
+
 test('the dev server\'s own requests and pages are not coverage', () => {
   for (const p of ['/__nuxt_dev__/error-overlay/3txzmn1dd2eod', '/__nuxt_devtools__/client', '/_nuxt/pages/index.vue', '/_nuxt/builds/meta/dev.json', '/__vite_ping', '/@vite/client', '/@fs/src/main.ts', '/@id/virtual:x', '/_next/static/chunks/app/page', '/_next/webpack-hmr', '/__nextjs_original-stack-frame', '/__webpack_hmr', '/sockjs-node/info', '/favicon.ico']) {
     assert.equal(endpointOf('GET', `${T}${p}`, T), null, p);
