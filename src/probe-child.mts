@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Browser, BrowserContext, Locator, Page, Request, Route } from 'playwright-core';
+import { allowedUrl } from './common.mjs';
 import { layoutCandidates } from './layout.mjs';
 import type { Check, FaultRecord, PageRecord, ProbeResult, RequestRecord, SignInFlow } from './results.mjs';
 
@@ -17,6 +18,8 @@ export interface ChildJob {
   probe: string;
   probeFile: string;
   target: string;
+  allowedHosts: readonly string[];
+  ignoreHTTPSErrors?: boolean;
   sessionFile: string;
   shotsDir: string;
   timeoutMs: number;
@@ -27,24 +30,23 @@ export interface ChildJob {
 type FaultSpec = number | 'malformed' | 'empty' | 'empty-list' | 'empty-object' | 'hang' | 'reset' | { delay: number } | { status: number; body?: string } | { json: unknown };
 interface PageOptions { width?: number; height?: number; timezoneId?: string; locale?: string }
 
-const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 const SHOT_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
 
-function isLoopback(url: string): boolean {
+function allowedRequest(url: string, target: string, allowedHosts: readonly string[]): boolean {
   try {
     const u = new URL(url);
     if (u.protocol === 'data:' || u.protocol === 'blob:' || u.protocol === 'about:') return true;
-    return LOOPBACK.has(u.hostname) || u.hostname.endsWith('.localhost');
   } catch {
     return false;
   }
+  return allowedUrl(url, target, allowedHosts);
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 const isApi = (req: Request) => ['xhr', 'fetch'].includes(req.resourceType());
 
-const NOT_IN_A_PROBE = 'is not available in a probe: every page and context comes from rr.newPage(), which keeps the loopback-only route, the watchers and the session';
+const NOT_IN_A_PROBE = 'is not available in a probe: every page and context comes from rr.newPage(), which keeps the authorized-hosts-only route, the watchers and the session';
 
 // The probe gets Playwright objects, and through them the browser and its
 // type. Their constructors are shared, so the methods that would make an
@@ -140,8 +142,8 @@ async function run(job: ChildJob): Promise<ProbeResult> {
       if (rec) { rec.fault = faulted.get(req) ?? null; rec.failure = req.failure()?.errorText ?? 'failed'; }
     });
   };
-  const loopbackOnly = (route: Route) => {
-    if (isLoopback(route.request().url())) return route.fallback();
+  const authorizedOnly = (route: Route) => {
+    if (allowedRequest(route.request().url(), job.target, job.allowedHosts)) return route.fallback();
     if (blocked.length < 20) blocked.push(clip(route.request().url(), 200));
     return route.abort('blockedbyclient');
   };
@@ -150,13 +152,14 @@ async function run(job: ChildJob): Promise<ProbeResult> {
   const makeContext = async (opts: PageOptions) => {
     const ctx = await guardedContext({
       baseURL: job.target,
+      ignoreHTTPSErrors: job.ignoreHTTPSErrors ?? false,
       viewport: { width: opts.width ?? DEFAULT_VIEWPORT.width, height: opts.height ?? DEFAULT_VIEWPORT.height },
       ...(opts.timezoneId ? { timezoneId: opts.timezoneId } : {}),
       ...(opts.locale ? { locale: opts.locale } : {}),
       ...(existsSync(job.sessionFile) ? { storageState: job.sessionFile } : {}),
     });
     ctx.on('page', watch);
-    await ctx.route('**/*', loopbackOnly);
+    await ctx.route('**/*', authorizedOnly);
     for (const f of activeFaults) await ctx.route(f.pattern, f.handler);
     if (offline) await ctx.setOffline(true);
     contexts.push(ctx);
@@ -327,7 +330,7 @@ async function run(job: ChildJob): Promise<ProbeResult> {
     // as it is (as JSON unless a content-type header says otherwise).
     async request(method: string, url: string, body?: unknown, opts: { raw?: boolean; headers?: Record<string, string> } = {}) {
       const absolute = new URL(url, job.target).toString();
-      if (!isLoopback(absolute)) throw new Error('rr.request reaches loopback hosts only');
+      if (!allowedUrl(absolute, job.target, job.allowedHosts)) throw new Error('rr.request reaches loopback and exact allowlisted HTTPS hosts only');
       const headers: Record<string, string> = { ...(opts.headers ?? {}) };
       const hasType = Object.keys(headers).some((k) => k.toLowerCase() === 'content-type');
       // A Buffer, because Playwright re-encodes a string that is not valid JSON.

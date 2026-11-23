@@ -32,7 +32,9 @@ export function bundledChromium(): { revision: string; version: string } {
 // Windows variable names ignore case, but a copy of process.env doesn't.
 function windowsVar(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const key = Object.keys(env).find((k) => k.toUpperCase() === name);
-  return key === undefined ? undefined : env[key];
+  if (key === undefined || !Object.hasOwn(env, key)) return undefined;
+  const value = env[key];
+  return typeof value === 'string' ? value : undefined;
 }
 
 export function playwrightCacheDir(env: NodeJS.ProcessEnv = process.env, platform = process.platform): string {

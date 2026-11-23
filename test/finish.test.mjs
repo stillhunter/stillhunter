@@ -2,7 +2,7 @@
 // may take before the wall limit, and the --proof-seconds flag; how it labels
 // each claim from its two re-runs; and which probe signs in again.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -171,4 +171,129 @@ test('a report is written whole, and a rename the system refuses for a moment is
   assert.throws(() => writeWhole(file, 'two', () => { throw Object.assign(new Error('no space'), { code: 'ENOSPC' }); }), /no space/);
   assert.throws(() => writeWhole(file, 'two', () => { throw Object.assign(new Error('still busy'), { code: 'EBUSY' }); }), /still busy/);
   assert.equal(readFileSync(file, 'utf8'), 'one');
+});
+
+
+async function generationReservation() {
+  const module = await import('../dist/finish.mjs');
+  assert.equal(typeof module.reserveProofGeneration, 'function', 'generation reservation API');
+  return module.reserveProofGeneration;
+}
+
+function generationRun(t) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'sh-generation-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+function existingGeneration(dir, generation) {
+  mkdirSync(path.join(dir, 'proof', 'generations', String(generation)), { recursive: true });
+}
+
+test('a missing proof counter reconciles existing generation directories instead of reusing one', async (t) => {
+  const reserve = await generationReservation();
+  const dir = generationRun(t);
+  existingGeneration(dir, 1);
+  existingGeneration(dir, 3);
+  writeFileSync(path.join(dir, 'proof', 'stateful.1.result.json'), 'latest compatibility copy\n');
+  assert.equal(reserve(dir), 4);
+  assert.equal(JSON.parse(readFileSync(path.join(dir, 'proof-generation.json'), 'utf8')).generation, 4);
+  assert.ok(existsSync(path.join(dir, 'proof', 'generations', '4')));
+});
+
+test('a truncated proof counter fails closed without replacing existing evidence', async (t) => {
+  const reserve = await generationReservation();
+  const dir = generationRun(t);
+  existingGeneration(dir, 1);
+  const counter = path.join(dir, 'proof-generation.json');
+  writeFileSync(counter, '{"generation":');
+  assert.throws(() => reserve(dir), /proof-generation\.json.*malformed/i);
+  assert.equal(readFileSync(counter, 'utf8'), '{"generation":');
+  assert.ok(!existsSync(path.join(dir, 'proof', 'generations', '2')));
+});
+
+test('a malformed proof counter fails closed when proof evidence exists', async (t) => {
+  const reserve = await generationReservation();
+  const dir = generationRun(t);
+  existingGeneration(dir, 1);
+  const counter = path.join(dir, 'proof-generation.json');
+  writeFileSync(counter, '{"generation":"1"}');
+  assert.throws(() => reserve(dir), /proof-generation\.json.*safe non-negative integer/i);
+  assert.equal(readFileSync(counter, 'utf8'), '{"generation":"1"}');
+  assert.ok(!existsSync(path.join(dir, 'proof', 'generations', '2')));
+});
+
+test('a stale proof counter advances beyond every existing generation', async (t) => {
+  const reserve = await generationReservation();
+  const dir = generationRun(t);
+  existingGeneration(dir, 1);
+  existingGeneration(dir, 2);
+  writeFileSync(path.join(dir, 'proof-generation.json'), '{"generation":1}');
+  assert.equal(reserve(dir), 3);
+  assert.equal(JSON.parse(readFileSync(path.join(dir, 'proof-generation.json'), 'utf8')).generation, 3);
+});
+
+test('an oversized proof counter cannot wrap around and overwrite generation one', async (t) => {
+  const reserve = await generationReservation();
+  const dir = generationRun(t);
+  existingGeneration(dir, 1);
+  writeFileSync(path.join(dir, 'proof-generation.json'), '{"generation":9007199254740992}');
+  assert.throws(() => reserve(dir), /proof-generation\.json.*safe non-negative integer/i);
+  assert.ok(!existsSync(path.join(dir, 'proof', 'generations', '2')));
+});
+
+test('the finish lock refuses a live owner and recovers a dead owner lock', async (t) => {
+  const module = await import('../dist/finish.mjs');
+  assert.equal(typeof module.acquireFinishLock, 'function', 'finish lock API');
+  const dir = generationRun(t);
+  const lockDir = path.join(dir, 'finish.lock');
+  const owner = path.join(lockDir, 'owner.json');
+  mkdirSync(lockDir);
+  writeFileSync(owner, JSON.stringify({ pid: process.pid }));
+  assert.throws(() => module.acquireFinishLock(dir), /another finish.*already running/i);
+  assert.ok(existsSync(lockDir), 'a live owner lock is left alone');
+
+  writeFileSync(owner, JSON.stringify({ pid: 99_999_999 }));
+  const release = module.acquireFinishLock(dir);
+  assert.equal(JSON.parse(readFileSync(owner, 'utf8')).pid, process.pid);
+  release();
+  assert.ok(!existsSync(lockDir));
+});
+
+
+test('evidence publication writes the atomic archive before exposing the latest copy', async (t) => {
+  const module = await import('../dist/finish.mjs');
+  assert.equal(typeof module.publishEvidence, 'function', 'evidence publication API');
+  const dir = generationRun(t);
+  const archive = path.join(dir, 'proof', 'generations', '1', 'findings.json');
+  const latest = path.join(dir, 'findings.json');
+  mkdirSync(path.dirname(archive), { recursive: true });
+  writeFileSync(latest, 'old latest\n');
+  const calls = [];
+  const interrupted = (file, text) => {
+    calls.push(file);
+    if (file === latest) throw new Error('interrupted before latest publication');
+    module.writeWhole(file, text);
+  };
+  assert.throws(() => module.publishEvidence(archive, latest, 'new evidence\n', interrupted), /interrupted before latest/);
+  assert.deepEqual(calls, [archive, latest]);
+  assert.equal(readFileSync(archive, 'utf8'), 'new evidence\n');
+  assert.equal(readFileSync(latest, 'utf8'), 'old latest\n');
+
+  module.publishEvidence(archive, latest, 'complete evidence\n');
+  assert.equal(readFileSync(archive, 'utf8'), 'complete evidence\n');
+  assert.equal(readFileSync(latest, 'utf8'), 'complete evidence\n');
+});
+
+
+test('a stale counter cannot overwrite legacy unarchived proof evidence', async (t) => {
+  const reserve = await generationReservation();
+  const dir = generationRun(t);
+  const legacy = path.join(dir, 'proof', 'stateful.1.result.json');
+  mkdirSync(path.dirname(legacy), { recursive: true });
+  writeFileSync(legacy, 'legacy evidence\n');
+  writeFileSync(path.join(dir, 'proof-generation.json'), '{"generation":1}');
+  assert.throws(() => reserve(dir), /unarchived proof evidence/i);
+  assert.equal(readFileSync(legacy, 'utf8'), 'legacy evidence\n');
+  assert.ok(!existsSync(path.join(dir, 'proof', 'generations', '2')));
 });

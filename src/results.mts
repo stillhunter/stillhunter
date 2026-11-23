@@ -10,9 +10,10 @@ export interface PageRecord { id: number; viewport: { width: number; height: num
 
 export type HostError = 'timeout' | 'crash' | 'no-result';
 
-// What ran before a probe when the config has a reset: the reset, and the
-// run's sign-in probe again (null when none ran: there was none yet, or this
-// probe is the sign-in probe). A sign-in can fail after it saved a session.
+// Setup and provenance before a probe: a reset when the phase's strategy calls
+// for one (zero seconds otherwise), and the sign-in selected for that attempt,
+// whether it was rerun or already held the scratch session. A proof rebuilds
+// that recorded session in its fresh scratch. A sign-in can fail after saving.
 export interface Before {
   resetSeconds: number;
   resetError: string | null;
@@ -113,7 +114,20 @@ export function allResults(runDir: string): ProbeResult[] {
     .map((f) => readResult(path.join(dir, f))).filter((r): r is ProbeResult => r !== null);
 }
 
-// The probe that signed in: the latest one whose run saved the session.
+// The last hunt run that actually wrote the scratch session, including one
+// that failed after rr.saveSession(). Its numbered result persists that fact.
+export function lastSessionWriter(runDir: string): string | null {
+  let writer: { probe: string; at: number } | null = null;
+  for (const r of allResults(runDir)) {
+    if (!r.savedSession) continue;
+    const at = r.finishedAt ?? r.startedAt ?? 0;
+    if (!writer || at >= writer.at) writer = { probe: r.probe, at };
+  }
+  return writer?.probe ?? null;
+}
+
+// The probe that signs in after a reset: prefer a clean latest run, but retain
+// a failed-after-save fallback because its session is still usable.
 export function signInProbe(runDir: string): string | null {
   // The latest probe whose run saved a session and ended without an error;
   // failing that, the latest that saved a session and failed after it. Its

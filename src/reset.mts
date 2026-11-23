@@ -1,11 +1,10 @@
-// The state each probe starts from when the config has a reset, in the hunt
-// and in the proof alike: app data goes back to what the reset makes, which
-// may sign everyone out, and a sign-in probe then signs in again, unless the
-// probe about to run is that sign-in probe. Sharing it is what lets finish
-// prove a finding from the state the hunt found it in.
+// Reset, then sign in again unless the probe about to run is the sign-in
+// probe. The always strategy uses this at start and before every hunt probe,
+// proof and replay; proof uses it only for proof and replay. A proof with a
+// fresh scratch can also use it to rebuild its session when no reset exists.
 import { spawn, spawnSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
-import type { Config } from './common.mjs';
+import { type Config, credentialValues, redact } from './common.mjs';
 import { PROBE_TIMEOUT_MS } from './probe-host.mjs';
 import type { Before, ProbeResult } from './results.mjs';
 
@@ -14,6 +13,15 @@ export const RESET_TIMEOUT_MS = 120_000;
 const STOP_GRACE_MS = 5_000;
 
 export const seconds = (ms: number) => Math.round(ms / 100) / 10;
+
+export type ResetPhase = 'start' | 'hunt' | 'proof' | 'replay';
+
+export function shouldReset(config: Config, phase: ResetPhase): boolean {
+  const reset = config.reset as Config['reset'] | string | undefined;
+  if (!reset) return false;
+  const strategy = typeof reset === 'string' ? 'always' : reset.strategy;
+  return strategy === 'always' || phase === 'proof' || phase === 'replay';
+}
 
 // Stops a process and everything it started. On POSIX the reset leads its own
 // process group; on Windows, taskkill follows the tree.
@@ -29,8 +37,9 @@ function stopAll(pid: number | undefined): void {
 // otherwise the command, how it ended and the end of what it printed. A reset
 // that runs past its time is stopped with every process it started, so none
 // of them goes on changing app data once the next probe has begun.
-export function resetApp(root: string, config: Config, timeoutMs = RESET_TIMEOUT_MS): Promise<string | null> {
-  const command = config.reset;
+export function resetApp(root: string, config: Config, timeoutMs = RESET_TIMEOUT_MS, secrets: readonly string[] = []): Promise<string | null> {
+  const reset = config.reset as Config['reset'] | string | undefined;
+  const command = typeof reset === 'string' ? reset : reset?.command;
   if (!command) return Promise.resolve(null);
   return new Promise((resolve) => {
     const child = spawn(command, { cwd: root, shell: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -45,7 +54,7 @@ export function resetApp(root: string, config: Config, timeoutMs = RESET_TIMEOUT
       clearTimeout(grace);
       if (why === null) return resolve(null);
       const printed = stderr.trim() || stdout.trim();
-      resolve(`reset ("${command}") failed: ${why}${printed ? `: ${printed.slice(-300)}` : ''}`);
+      resolve(redact(`reset ("${command}") failed: ${why}${printed ? `: ${printed.slice(-300)}` : ''}`, secrets));
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -73,6 +82,7 @@ export interface ResetJob {
   // even when the app's sessions outlive its reset.
   sessionFile: string;
   resetTimeoutMs?: number;
+  signInVariables?: readonly string[];
   // How long the sign-in may take; null when there is no time for it.
   signInTimeoutMs?: () => number | null;
   runSignIn: (name: string, timeoutMs: number) => Promise<ProbeResult>;
@@ -84,7 +94,7 @@ export interface ResetJob {
 // would start signed out for no reason of the app's.
 export async function resetAndSignIn(job: ResetJob): Promise<Before | null> {
   const t0 = Date.now();
-  const resetError = await resetApp(job.root, job.config, job.resetTimeoutMs);
+  const resetError = await resetApp(job.root, job.config, job.resetTimeoutMs, credentialValues(job.signInVariables ?? []));
   const resetSeconds = seconds(Date.now() - t0);
   rmSync(job.sessionFile, { force: true });
   if (!job.signIn || job.signIn === job.probe) return { resetSeconds, resetError, signIn: null };
