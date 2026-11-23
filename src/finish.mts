@@ -4,11 +4,11 @@
 import { copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { claimProblems, type Dismissal, type Finding, type FinishInput, parseFinishInput, unaccounted, type Unaccounted } from './accounting.mjs';
-import { atOrAbove, block, brief, type Config, type Context, flag, FOLDER, loadRun, minutesAndSeconds, readConfig, readStdin, remaining, type Severity, severityOf } from './common.mjs';
+import { atOrAbove, block, brief, type Config, type Context, flag, FOLDER, hostPolicy, loadRun, minutesAndSeconds, readConfig, readStdin, remaining, resetTimeoutMs, type Severity, severityOf } from './common.mjs';
 import { coverage, coverageLines } from './coverage.mjs';
 import { hiddenLine } from './flags.mjs';
 import { KILL_GRACE_MS, PROBE_TIMEOUT_MS, runProbe, sessionPath } from './probe-host.mjs';
-import { RESET_TIMEOUT_MS, resetAndSignIn, signedOut } from './reset.mjs';
+import { resetAndSignIn, signedOut } from './reset.mjs';
 import { allResults, type Before, latestResults, outcome, type ProbeResult, probesDir, signInProbe } from './results.mjs';
 import { answers } from './target.mjs';
 
@@ -103,9 +103,14 @@ interface Prover {
 // it (or cut it short), so the probe counts as not re-run in time.
 async function proofRun(p: Prover, probe: string, label: string): Promise<ProbeResult | null> {
   const proofDir = path.join(p.dir, 'proof');
+  const huntStart = p.latest.get(probe)?.before;
+  const signInBefore = p.config.reset ? (huntStart ? (huntStart.signIn?.probe ?? null) : p.signIn) : null;
+  // The sign-in hosts go only to the probe that signs in: the one run before
+  // this re-run, or the claimed probe when it is the run's sign-in probe.
   const host = (name: string, timeoutMs: number) => runProbe({
     runDir: p.dir, probe: name, probeFile: path.join(probesDir(p.dir), `${name}.mjs`), target: p.ctx.target, browser: p.ctx.browser,
     signInVariables: p.ctx.signInVariables, shotsDir: path.join(proofDir, 'shots'), timeoutMs,
+    network: hostPolicy(p.config, name === signInBefore || name === p.signIn),
   });
   const save = (r: ProbeResult, file: string) => { writeFileSync(path.join(proofDir, file), JSON.stringify(r, null, 2) + '\n'); return r; };
   // App data and, with it, any session go back to the start, and the probe
@@ -114,11 +119,10 @@ async function proofRun(p: Prover, probe: string, label: string): Promise<ProbeR
   // hunt run with no record of that falls back to the run's sign-in probe.
   let before: Before | null = null;
   if (p.config.reset) {
-    const resetMs = Math.min(RESET_TIMEOUT_MS, p.wallDeadline - Date.now() - KILL_GRACE_MS - RUN_MARGIN_MS - MIN_RUN_MS);
+    const resetMs = Math.min(resetTimeoutMs(p.config), p.wallDeadline - Date.now() - KILL_GRACE_MS - RUN_MARGIN_MS - MIN_RUN_MS);
     if (resetMs <= 0) return null;
-    const huntStart = p.latest.get(probe)?.before;
     before = await resetAndSignIn({
-      root: p.root, config: p.config, probe, signIn: huntStart ? (huntStart.signIn?.probe ?? null) : p.signIn, sessionFile: sessionPath(p.dir), resetTimeoutMs: resetMs,
+      root: p.root, config: p.config, probe, signIn: signInBefore, sessionFile: sessionPath(p.dir), resetTimeoutMs: resetMs,
       signInTimeoutMs: () => runTimeout(Date.now(), p.wallDeadline),
       runSignIn: async (name, t) => save(await host(name, t), `${probe}.${label}.signin.result.json`),
     });
@@ -234,7 +238,7 @@ export async function finish(args: string[]): Promise<void> {
   const state = readState(dir);
   const missing = unaccounted(input, latest);
   const signIn = signInProbe(dir);
-  const cov = coverage(allResults(dir), ctx.target);
+  const cov = coverage(allResults(dir), ctx.target, hostPolicy(readConfig(root), false).allow);
   const left = remaining(ctx);
   const refusal: string[] = [];
   if (missing.length && !state.accountingRefused) {

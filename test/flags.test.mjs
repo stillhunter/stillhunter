@@ -5,10 +5,10 @@ import { hiddenLine, parseStartFlags } from '../dist/flags.mjs';
 const flags = (...args) => parseStartFlags(args);
 
 test('depth sets the budget: quick 4, default 10, deep 25 minutes; --minutes overrides it', () => {
-  assert.deepEqual(flags(), { ok: true, flags: { depth: 'default', minutes: 10, minSeverity: 'low', focus: null } });
+  assert.deepEqual(flags(), { ok: true, flags: { depth: 'default', minutes: 10, minSeverity: 'low', focus: null, url: null } });
   assert.equal(flags('--depth', 'quick').flags.minutes, 4);
   assert.equal(flags('--depth', 'deep').flags.minutes, 25);
-  assert.deepEqual(flags('--depth', 'deep', '--minutes', '7').flags, { depth: 'deep', minutes: 7, minSeverity: 'low', focus: null });
+  assert.deepEqual(flags('--depth', 'deep', '--minutes', '7').flags, { depth: 'deep', minutes: 7, minSeverity: 'low', focus: null, url: null });
 });
 
 test('bad values are refused with what is allowed', () => {

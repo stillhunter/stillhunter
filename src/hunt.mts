@@ -4,7 +4,7 @@
 // contained child process against a loopback-only browser and, at the end,
 // re-runs every claimed finding from scratch so only reproducible ones are
 // reported. Findings worth keeping become tests that replay with no model.
-//   stillhunter start [--depth quick|default|deep] [--minutes N] [--min-severity high|medium|low] [--focus "<text>"]
+//   stillhunter start [--depth quick|default|deep] [--minutes N] [--min-severity high|medium|low] [--focus "<text>"] [--url <loopback URL>]
 //   stillhunter probe --run <id> --name <name>     (script on stdin)
 //   stillhunter finish --run <id> [--proof-seconds N]  (findings JSON on stdin)
 //   stillhunter diff [--file <path>]               (the change, or one file's whole diff)
@@ -15,9 +15,10 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { chooseBrowser, installedOnThisMachine } from './browser.mjs';
 import { baseRef, changeList, changeText, collectChange, ensureRunsIgnored, fileDiff, readSpecs } from './change.mjs';
-import { block, brief, type Context, fail, FOLDER, flag, loadRun, PROBE_NAME, readConfig, readStdin, remaining, repoRoot, runsDir, signInVariableNames, stamp, findTargetUrl } from './common.mjs';
+import { block, brief, type Context, fail, findTarget, FOLDER, flag, hostPolicy, loadRun, noTargetMessage, PROBE_NAME, readConfig, readStdin, remaining, repoRoot, resetsEveryProbe, runsDir, signInVariableNames, signInVariablesLine, stamp, unsetSignInVariables } from './common.mjs';
 import { finish } from './finish.mjs';
 import { parseStartFlags } from './flags.mjs';
+import { networkLine } from './hosts.mjs';
 import { keep, replay } from './keep.mjs';
 import { runProbe, sessionPath } from './probe-host.mjs';
 import { resetAndSignIn, resetApp, seconds } from './reset.mjs';
@@ -30,13 +31,16 @@ async function start(args: string[]): Promise<void> {
   const root = repoRoot();
   const parsed = parseStartFlags(args);
   if (!parsed.ok) fail(parsed.message);
-  const { depth, minutes, minSeverity, focus } = parsed.flags;
+  const { depth, minutes, minSeverity, focus, url } = parsed.flags;
   const base = baseRef(root);
   const change = collectChange(root, base);
   if (change.empty && !focus) fail(NO_CHANGE);
   const config = readConfig(root);
-  const target = await findTargetUrl(root, config);
-  if (!target) fail(`No running app found. Start your dev server, or set "target": { "url": ... } in ${FOLDER}/config.json.`);
+  const unset = unsetSignInVariables(config);
+  if (unset.length) fail(`${FOLDER}/config.json names sign-in variable${unset.length === 1 ? '' : 's'} the environment does not hold: ${unset.join(', ')}. Set ${unset.length === 1 ? 'it' : 'them'} in your shell before you start Claude Code, or remove ${unset.length === 1 ? 'it' : 'them'} from "signIn.variables".`);
+  const found = url ? { url, how: '--url' } : await findTarget(root, config);
+  if (found.url === null) fail(noTargetMessage(found.why));
+  const target = found.url;
   if ((await answers(target)) === null) fail(`Nothing answers at ${target}. Start your dev server first.`);
   const choice = chooseBrowser(config.browser ?? null, installedOnThisMachine());
   if (!choice.ok) fail(choice.message);
@@ -55,7 +59,7 @@ async function start(args: string[]): Promise<void> {
   ensureRunsIgnored(path.join(root, FOLDER, '.gitignore'));
 
   const mode = change.empty ? 'feature' : 'change';
-  const signInVariables = signInVariableNames();
+  const signInVariables = signInVariableNames(process.env, config);
   const ctx: Context = {
     runId, root, target, browser: choice.name, base, startedAt: now, deadline: now + minutes * 60_000,
     depth, budgetMinutes: minutes, minSeverity, focus, mode, signInVariables,
@@ -65,13 +69,17 @@ async function start(args: string[]): Promise<void> {
   const specs = readSpecs(root);
   const lines = [
     `stillhunter | run ${runId}`,
-    `target: ${target} | browser: ${choice.name} | budget: ${minutes} min (depth ${depth}) | report: ${minSeverity === 'low' ? 'every severity' : `${minSeverity} severity and above`}`,
+    `target: ${target} (${found.how}) | browser: ${choice.name} | budget: ${minutes} min (depth ${depth}) | report: ${minSeverity === 'low' ? 'every severity' : `${minSeverity} severity and above`}`,
+    ...(url && !config.target?.url ? [`To skip --url next time, set it in ${FOLDER}/config.json: { "target": { "url": "${target}" } }`] : []),
     `focus: ${focus ?? 'none (the whole change)'}`,
     mode === 'feature'
       ? `mode: feature. There is no change against the base, so this hunt tests "${focus}" as it stands.`
       : `mode: change. diff base: ${base.slice(0, 12)} (one file's whole diff: diff --file <file>)`,
-    `sign-in variables set in the environment (names only): ${signInVariables.length ? signInVariables.join(', ') : 'none'}`,
-    ...(config.reset ? [`reset: app data is reset before every probe and every re-run, back to what the app holds now, and the sign-in probe then signs in again; the reset took ${resetSeconds} s`] : []),
+    signInVariablesLine(signInVariables, config),
+    networkLine(hostPolicy(config, true).allow, hostPolicy(config, true).signIn),
+    ...(config.reset ? [resetsEveryProbe(config)
+      ? `reset: app data is reset before every probe and every re-run, back to what the app holds now, and the sign-in probe then signs in again; the reset took ${resetSeconds} s`
+      : `reset: only before each re-run in finish and each replayed test, back to what the app holds now, then the sign-in probe signs in again; hunt probes share app data. The reset took ${resetSeconds} s`] : []),
     'changed files:',
     ...(change.files.length ? change.files.map((l) => `  ${l}`) : ['  none']),
     `specs: ${specs.length ? specs.map((s) => s.file).join(', ') : 'none'}`,
@@ -109,16 +117,20 @@ async function probe(args: string[]): Promise<void> {
   const probeFile = path.join(probesDir(dir), `${name}.mjs`);
   writeFileSync(probeFile, script);
   const n = nextRunNumber(dir, name);
+  const config = readConfig(root);
+  const signIn = signInProbe(dir);
+  // The sign-in hosts go to the run's sign-in probe, or to any probe while the
+  // run has none yet, so the first probe can sign in.
   const run = (probeName: string, timeoutMs?: number) => runProbe({
     runDir: dir, probe: probeName, probeFile: path.join(probesDir(dir), `${probeName}.mjs`), target: ctx.target, browser: ctx.browser,
     signInVariables: ctx.signInVariables, shotsDir: path.join(dir, 'shots'), timeoutMs,
+    network: hostPolicy(config, signIn === null || probeName === signIn),
   });
   // The same start the proof gives each re-run: app data reset, then signed
   // in again by the run's sign-in probe, so what a probe finds is what finish
-  // can prove. The probe runs whatever went wrong, and says so.
-  const config = readConfig(root);
-  const signIn = signInProbe(dir);
-  const before = config.reset
+  // can prove. The probe runs whatever went wrong, and says so. With
+  // "resetBefore": "re-runs" only finish and replay reset.
+  const before = resetsEveryProbe(config)
     ? await resetAndSignIn({
       root, config, probe: name, signIn, sessionFile: sessionPath(dir),
       runSignIn: async (s, timeoutMs) => {
@@ -173,7 +185,7 @@ function diff(args: string[]): void {
   process.stdout.write(block([`stillhunter | diff | base ${base.slice(0, 12)} | ${file}`, r.text.replace(/\n$/, '') || '(no difference)']));
 }
 
-const USAGE = 'Usage: stillhunter start [--depth quick|default|deep] [--minutes N] [--min-severity high|medium|low] [--focus "<text>"] | probe --run <id> --name <name> | finish --run <id> [--proof-seconds N] | diff [--file <path>] | keep --run <id> --probe <name> --check <check> [--as <name>] | replay [names] [--watch]';
+const USAGE = 'Usage: stillhunter start [--depth quick|default|deep] [--minutes N] [--min-severity high|medium|low] [--focus "<text>"] [--url <loopback URL>] | probe --run <id> --name <name> | finish --run <id> [--proof-seconds N] | diff [--file <path>] | keep --run <id> --probe <name> --check <check> [--as <name>] | replay [names] [--watch]';
 
 const [sub, ...rest] = process.argv.slice(2);
 if (sub === 'start') await start(rest);

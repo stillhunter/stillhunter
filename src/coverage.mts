@@ -1,6 +1,7 @@
 // What the hunt has covered, from every probe run: each API endpoint the app's
 // pages called (method and path, ids folded), the faults applied to each, and
 // each page visited with the widths it was seen at.
+import { hostMatches, isLoopbackHost } from './hosts.mjs';
 import type { ProbeResult } from './results.mjs';
 
 export const NARROW_WIDTH = 375;
@@ -18,8 +19,6 @@ const ASSET = /\.(m?js|css|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|otf|eo
 // app's data, such as /_next/data/, /_next/image and /__nuxt_island/, count.
 const DEV_PATH = /^\/(?:_nuxt\/|__nuxt_dev__\/|__nuxt_devtools__\/|_next\/static\/|_next\/webpack-hmr|__nextjs|__vite|@vite\/|@fs\/|@id\/|__webpack|sockjs-node|favicon\.ico|node_modules\/)/;
 
-const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
-
 function parse(url: string, target: string): URL | null {
   try {
     return new URL(url, target);
@@ -28,13 +27,16 @@ function parse(url: string, target: string): URL | null {
   }
 }
 
-// A request the loopback-only route let through, so it reached the app (the
-// target origin or another loopback port). A page call to a tracker or
+// A request the network route let through to the app: the target origin,
+// another loopback port, or an https host the config's network.allow lists
+// (a staging API the dev frontend calls). A page call to a tracker or
 // analytics host was aborted before it reached anything, so it is not coverage
-// of the app and must not feed "seen but never faulted".
-function reachesApp(url: string, target: string): boolean {
+// of the app and must not feed "seen but never faulted". Sign-in hosts are not
+// the app either.
+function reachesApp(url: string, target: string, allow: readonly string[]): boolean {
   const u = parse(url, target);
-  return Boolean(u && (LOOPBACK.has(u.hostname) || u.hostname.endsWith('.localhost')));
+  if (!u) return false;
+  return isLoopbackHost(u.hostname) || (u.protocol === 'https:' && hostMatches(u.hostname, allow));
 }
 
 export function foldPath(pathname: string): string {
@@ -77,19 +79,19 @@ export interface Coverage {
 // while it signed in (the sign-in page and the requests made before the page
 // it landed on) is left out, unless another probe saw it too. The page it
 // landed on, and everything after, counts.
-export function coverage(results: ProbeResult[], target: string): Coverage {
+export function coverage(results: ProbeResult[], target: string, allow: readonly string[] = []): Coverage {
   const endpoints = new Map<string, Set<string>>();
   const pages = new Map<string, Set<number>>();
   const viewports = new Set<string>();
   for (const r of results) {
     const flow = r.signInFlow;
     (r.requests ?? []).forEach((req, i) => {
-      if ((flow && i < flow.requests) || req.via !== 'page' || !reachesApp(req.url, target)) return;
+      if ((flow && i < flow.requests) || req.via !== 'page' || !reachesApp(req.url, target, allow)) return;
       const e = endpointOf(req.method, req.url, target);
       if (e && !endpoints.has(e)) endpoints.set(e, new Set());
     });
     for (const f of r.faults ?? []) {
-      if (!reachesApp(f.url, target)) continue;
+      if (!reachesApp(f.url, target, allow)) continue;
       const e = endpointOf(f.method, f.url, target);
       if (!e) continue;
       const set = endpoints.get(e) ?? new Set<string>();

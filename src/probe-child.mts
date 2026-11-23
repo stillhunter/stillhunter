@@ -4,10 +4,11 @@
 // probe `rr`: guarded pages, faults on requests, an observation of what the
 // page shows, screenshots and named expectations. The result goes back to the
 // host over IPC.
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Browser, BrowserContext, Locator, Page, Request, Route } from 'playwright-core';
+import { allowedUrl, type HostPolicy, keptOrigins, LOOPBACK_ONLY } from './hosts.mjs';
 import { layoutCandidates } from './layout.mjs';
 import type { Check, FaultRecord, PageRecord, ProbeResult, RequestRecord, SignInFlow } from './results.mjs';
 
@@ -17,6 +18,9 @@ export interface ChildJob {
   probe: string;
   probeFile: string;
   target: string;
+  // Hosts besides loopback the browser may reach over https; the sign-in
+  // hosts only until the probe's first rr.saveSession().
+  network?: HostPolicy;
   sessionFile: string;
   shotsDir: string;
   timeoutMs: number;
@@ -27,24 +31,26 @@ export interface ChildJob {
 type FaultSpec = number | 'malformed' | 'empty' | 'empty-list' | 'empty-object' | 'hang' | 'reset' | { delay: number } | { status: number; body?: string } | { json: unknown };
 interface PageOptions { width?: number; height?: number; timezoneId?: string; locale?: string }
 
-const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 const SHOT_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
 
-function isLoopback(url: string): boolean {
+// A page request the route lets through: data, blob and about URLs, loopback
+// http and https, and https to the hosts the policy lists, the sign-in hosts
+// only while the sign-in is open.
+function pageAllowed(url: string, policy: HostPolicy, signInOpen: boolean): boolean {
   try {
     const u = new URL(url);
     if (u.protocol === 'data:' || u.protocol === 'blob:' || u.protocol === 'about:') return true;
-    return LOOPBACK.has(u.hostname) || u.hostname.endsWith('.localhost');
   } catch {
     return false;
   }
+  return allowedUrl(url, policy, { signIn: signInOpen });
 }
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
 const isApi = (req: Request) => ['xhr', 'fetch'].includes(req.resourceType());
 
-const NOT_IN_A_PROBE = 'is not available in a probe: every page and context comes from rr.newPage(), which keeps the loopback-only route, the watchers and the session';
+const NOT_IN_A_PROBE = 'is not available in a probe: every page and context comes from rr.newPage(), which keeps the network route, the watchers and the session';
 
 // The probe gets Playwright objects, and through them the browser and its
 // type. Their constructors are shared, so the methods that would make an
@@ -76,11 +82,26 @@ function lockDown(browser: Browser): (options: Parameters<Browser['newContext']>
   };
 }
 
+// Tells the host the sign-in saved its session, and waits until its relay and
+// proxy have closed the sign-in hosts, so the probe's next request already
+// meets them closed.
+function closeSignInOnHost(): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); process.off('message', onMessage); resolve(); };
+    const onMessage = (m: { signInClosed?: boolean }) => { if (m?.signInClosed === true) done(); };
+    const timer = setTimeout(done, 5000);
+    process.on('message', onMessage);
+    process.send?.({ signedIn: true });
+  });
+}
+
 async function run(job: ChildJob): Promise<ProbeResult> {
   const startedAt = Date.now();
   const { chromium } = await import('playwright-core');
   const browser = await chromium.connect(job.wsEndpoint, { slowMo: job.slowMo || undefined, timeout: 30_000 });
   const guardedContext = lockDown(browser);
+  const network = job.network ?? LOOPBACK_ONLY;
+  let signInOpen = network.signIn.length > 0;
 
   const checks: Check[] = [];
   const notes: { label: string; value: unknown }[] = [];
@@ -140,8 +161,8 @@ async function run(job: ChildJob): Promise<ProbeResult> {
       if (rec) { rec.fault = faulted.get(req) ?? null; rec.failure = req.failure()?.errorText ?? 'failed'; }
     });
   };
-  const loopbackOnly = (route: Route) => {
-    if (isLoopback(route.request().url())) return route.fallback();
+  const networkRoute = (route: Route) => {
+    if (pageAllowed(route.request().url(), network, signInOpen)) return route.fallback();
     if (blocked.length < 20) blocked.push(clip(route.request().url(), 200));
     return route.abort('blockedbyclient');
   };
@@ -156,7 +177,7 @@ async function run(job: ChildJob): Promise<ProbeResult> {
       ...(existsSync(job.sessionFile) ? { storageState: job.sessionFile } : {}),
     });
     ctx.on('page', watch);
-    await ctx.route('**/*', loopbackOnly);
+    await ctx.route('**/*', networkRoute);
     for (const f of activeFaults) await ctx.route(f.pattern, f.handler);
     if (offline) await ctx.setOffline(true);
     contexts.push(ctx);
@@ -245,6 +266,16 @@ async function run(job: ChildJob): Promise<ProbeResult> {
     },
     async saveSession() {
       await mainContext.storageState({ path: job.sessionFile });
+      if (network.signIn.length || network.allow.length) {
+        const state = JSON.parse(readFileSync(job.sessionFile, 'utf8')) as { origins?: { origin?: unknown }[] };
+        writeFileSync(job.sessionFile, JSON.stringify(keptOrigins(state, network)));
+      }
+      // The first save ends the sign-in: the sign-in hosts close here, and in
+      // the host's relay and proxy.
+      if (signInOpen) {
+        signInOpen = false;
+        await closeSignInOnHost();
+      }
       // The first save ends the sign-in: the pages before the one it landed
       // on, and the requests made before that page, are how it signed in.
       if (!savedSession) {
@@ -327,7 +358,9 @@ async function run(job: ChildJob): Promise<ProbeResult> {
     // as it is (as JSON unless a content-type header says otherwise).
     async request(method: string, url: string, body?: unknown, opts: { raw?: boolean; headers?: Record<string, string> } = {}) {
       const absolute = new URL(url, job.target).toString();
-      if (!isLoopback(absolute)) throw new Error('rr.request reaches loopback hosts only');
+      if (!allowedUrl(absolute, network, { signIn: false })) {
+        throw new Error(network.allow.length ? 'rr.request reaches loopback hosts and, over https, the hosts network.allow lists only' : 'rr.request reaches loopback hosts only');
+      }
       const headers: Record<string, string> = { ...(opts.headers ?? {}) };
       const hasType = Object.keys(headers).some((k) => k.toLowerCase() === 'content-type');
       // A Buffer, because Playwright re-encodes a string that is not valid JSON.

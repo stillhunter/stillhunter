@@ -9,7 +9,8 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, realpathSync } from 'node:fs';
-import { createServer, type Server } from 'node:net';
+import { connect, createServer, type Server, type Socket } from 'node:net';
+import { allowedTunnel, type HostPolicy, LOOPBACK_ONLY } from './hosts.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { playwrightCoreDir } from './browser.mjs';
@@ -35,6 +36,9 @@ export interface HostJob {
   slowMo?: number;
   keepOpenMs?: number;
   timeoutMs?: number;
+  // Hosts besides loopback the browser may reach over https. The sign-in
+  // hosts are given only to a probe that may sign in.
+  network?: HostPolicy;
 }
 
 // The child's one writable place for a session and its own scratch, shared by
@@ -98,14 +102,108 @@ export function childEnv(names: string[], env: NodeJS.ProcessEnv = process.env, 
   return out;
 }
 
-// A local port that drops every connection. The browser's proxy points here
-// and WebRTC is held to the proxy, so a connection to any host but loopback
-// (which Chrome never proxies) fails, whatever context or socket a page opens.
-function closedProxy(): Promise<Server> {
+export interface GatedProxy {
+  server: Server;
+  port: number;
+  // Ends the sign-in: tunnels to sign-in hosts are cut, and no new one opens.
+  closeSignIn(): void;
+  // Every CONNECT the proxy refused, host and port.
+  refused: string[];
+}
+
+const MAX_HEAD = 8 * 1024;
+const TLS_HANDSHAKE = 0x16;
+const MAX_REFUSED = 20;
+
+export type Dial = (host: string, port: number) => Socket;
+const directDial: Dial = (host, port) => connect({ host, port });
+
+// The browser's proxy: a local port that drops every connection except an
+// HTTPS tunnel (CONNECT host:port) to a host the policy lists. Chrome never
+// sends loopback through a proxy, and WebRTC is held to the proxy, so a
+// connection to any other host fails, whatever context or socket a page
+// opens. With no hosts listed it drops everything, as it always did. Plain
+// http through the proxy is never forwarded, and a tunnel that does not start
+// with a TLS handshake is cut, so listed hosts are reached over TLS only. The
+// tunnel carries TLS end to end: the proxy sees the host name, never the
+// traffic.
+export function gatedProxy(policy: HostPolicy = LOOPBACK_ONLY, dial: Dial = directDial): Promise<GatedProxy> {
+  let signIn = [...policy.signIn];
+  const refused: string[] = [];
+  const signInTunnels = new Set<Socket>();
+  const server = createServer((client) => {
+    client.on('error', () => {});
+    let head = Buffer.alloc(0);
+    const onData = (chunk: Buffer) => {
+      head = Buffer.concat([head, chunk]);
+      const end = head.indexOf('\r\n\r\n');
+      if (end === -1) {
+        if (head.length > MAX_HEAD) client.destroy();
+        return;
+      }
+      client.off('data', onData);
+      client.pause();
+      const line = head.subarray(0, head.indexOf('\r\n')).toString('latin1');
+      const m = /^CONNECT ([A-Za-z0-9.-]+):(\d{1,5}) HTTP\/1\.[01]$/.exec(line);
+      const host = m?.[1]?.toLowerCase().replace(/\.$/, '') ?? '';
+      const port = Number(m?.[2] ?? 0);
+      const current: HostPolicy = { allow: policy.allow, signIn };
+      if (!m || port < 1 || port > 65535 || !allowedTunnel(host, current)) {
+        if (refused.length < MAX_REFUSED) refused.push(m ? `${host}:${port}` : line.slice(0, 120));
+        client.destroy();
+        return;
+      }
+      const forSignIn = !allowedTunnel(host, { allow: policy.allow, signIn: [] });
+      const upstream = dial(host, port);
+      const tunnel = [client, upstream];
+      if (forSignIn) for (const t of tunnel) signInTunnels.add(t);
+      let open = false;
+      const drop = () => { for (const t of tunnel) { t.destroy(); signInTunnels.delete(t); } };
+      // An allowed host that cannot be reached answers 502, so the browser
+      // says the tunnel failed rather than that nothing answered: the host was
+      // allowed, and the network is what failed.
+      upstream.on('error', () => {
+        if (!open && !client.destroyed) client.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n', drop);
+        else drop();
+      });
+      client.on('error', drop);
+      upstream.on('close', () => { if (open) drop(); });
+      client.on('close', drop);
+      upstream.once('connect', () => {
+        open = true;
+        client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        // A tunnel carries TLS only: its first byte must start a TLS
+        // handshake record (0x16). Chrome tunnels a plain ws:// WebSocket
+        // through the proxy too, and that would reach a listed host in the clear.
+        const forward = (first: Buffer) => {
+          if (first[0] !== TLS_HANDSHAKE) return drop();
+          upstream.write(first);
+          client.pipe(upstream);
+          upstream.pipe(client);
+          client.resume();
+        };
+        const rest = head.subarray(end + 4);
+        if (rest.length) forward(rest);
+        else {
+          client.once('data', (first: Buffer) => { client.pause(); forward(first); });
+          client.resume();
+        }
+      });
+    };
+    client.on('data', onData);
+  });
   return new Promise((resolve, reject) => {
-    const server = createServer((socket) => socket.destroy());
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolve(server));
+    server.listen(0, '127.0.0.1', () => resolve({
+      server,
+      port: (server.address() as { port: number }).port,
+      refused,
+      closeSignIn: () => {
+        signIn = [];
+        for (const t of signInTunnels) t.destroy();
+        signInTunnels.clear();
+      },
+    }));
   });
 }
 
@@ -147,17 +245,17 @@ export async function runProbe(job: HostJob): Promise<ProbeResult> {
   const before = sessionValues(sessionFile);
   const timeoutMs = job.timeoutMs ?? PROBE_TIMEOUT_MS;
   const { chromium } = await import('playwright-core');
-  let proxy: Server | null = null;
+  const network = job.network ?? LOOPBACK_ONLY;
+  let proxy: GatedProxy | null = null;
   let server: Awaited<ReturnType<typeof chromium.launchServer>> | null = null;
   let relay: Relay | null = null;
   try {
-    proxy = await closedProxy();
-    const { port } = proxy.address() as { port: number };
-    server = await chromium.launchServer({ channel: job.browser, headless: !job.headed, host: '127.0.0.1', args: [`--proxy-server=http://127.0.0.1:${port}`, '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'] });
-    relay = await startRelay(server.wsEndpoint(), job.target);
+    proxy = await gatedProxy(network);
+    server = await chromium.launchServer({ channel: job.browser, headless: !job.headed, host: '127.0.0.1', args: [`--proxy-server=http://127.0.0.1:${proxy.port}`, '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'] });
+    relay = await startRelay(server.wsEndpoint(), job.target, network);
   } catch (e) {
     await server?.kill().catch(() => {});
-    proxy?.close();
+    proxy?.server.close();
     return emptyResult(job.probe, `the browser did not start: ${String((e as Error).message).split('\n')[0]}`, 'crash');
   }
 
@@ -178,7 +276,15 @@ export async function runProbe(job: HostJob): Promise<ProbeResult> {
       child.kill('SIGKILL');
       settle(emptyResult(job.probe, `probe timed out after ${Math.round((timeoutMs + KILL_GRACE_MS) / 1000)} s and was stopped`, 'timeout'));
     }, timeoutMs + KILL_GRACE_MS + (job.keepOpenMs ?? 0));
-    child.on('message', (m: { nonce?: string; result?: ProbeResult; fatal?: string }) => {
+    child.on('message', (m: { nonce?: string; result?: ProbeResult; fatal?: string; signedIn?: boolean }) => {
+      // The sign-in saved its session: the sign-in hosts close for the rest
+      // of this probe. This needs no nonce, since it can only take access away.
+      if (m?.signedIn === true) {
+        proxy!.closeSignIn();
+        relay!.closeSignIn();
+        if (child.connected) child.send({ signInClosed: true });
+        return;
+      }
       if (m?.nonce !== nonce) return;
       if (m.result) settle(m.result);
       else settle(emptyResult(job.probe, `probe host failed: ${m.fatal ?? 'unknown error'}`, 'crash'));
@@ -194,6 +300,7 @@ export async function runProbe(job: HostJob): Promise<ProbeResult> {
       probe: job.probe,
       probeFile: job.probeFile,
       target: job.target,
+      network,
       sessionFile,
       shotsDir: job.shotsDir,
       timeoutMs,
@@ -207,7 +314,9 @@ export async function runProbe(job: HostJob): Promise<ProbeResult> {
   // gracefully: it is much faster, and its profile folder is removed either way.
   await relay.close().catch(() => {});
   await server.kill().catch(() => {});
-  proxy.close();
+  proxy.server.close();
+  // The proxy's own refusals stay out of the result: the browser's background
+  // traffic (updates, safe browsing) lands there too, and says nothing about the app.
   result.refused = [...relay.refused];
   result.output = output.trim();
   if (result.hostError && result.output) result.error = `${result.error ?? ''} | output: ${result.output.slice(-400)}`;

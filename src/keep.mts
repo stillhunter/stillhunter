@@ -6,7 +6,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFi
 import path from 'node:path';
 import { chooseBrowser, installedOnThisMachine } from './browser.mjs';
 import { ensureRunsIgnored } from './change.mjs';
-import { block, type Context, fail, findTargetUrl, FOLDER, flag, loadRun, PROBE_NAME, readConfig, repoRoot, runsDir, signInVariableNames, stamp, testsDir } from './common.mjs';
+import { block, type Context, fail, findTarget, FOLDER, flag, hostPolicy, loadRun, noTargetMessage, PROBE_NAME, readConfig, repoRoot, runsDir, signInVariableNames, stamp, testsDir, unsetSignInVariables } from './common.mjs';
 import { runProbe, sessionPath } from './probe-host.mjs';
 import { resetAndSignIn } from './reset.mjs';
 import { type Before, outcome, probesDir, type ProbeResult, signInProbe } from './results.mjs';
@@ -115,8 +115,11 @@ export async function replay(args: string[]): Promise<void> {
   if (watch && selected.length !== 1) fail(`--watch shows one test in a visible browser. Name one: ${selected.map((t) => t.name).join(', ')}.`);
 
   const config = readConfig(root);
-  const target = await findTargetUrl(root, config);
-  if (!target) fail(`No running app found. Start your dev server, or set "target": { "url": ... } in ${FOLDER}/config.json.`);
+  const unset = unsetSignInVariables(config);
+  if (unset.length) fail(`${FOLDER}/config.json names sign-in variable${unset.length === 1 ? '' : 's'} the environment does not hold: ${unset.join(', ')}. Set ${unset.length === 1 ? 'it' : 'them'} before replaying.`);
+  const found = await findTarget(root, config);
+  if (found.url === null) fail(noTargetMessage(found.why));
+  const target = found.url;
   if ((await answers(target)) === null) fail(`Nothing answers at ${target}. Start your dev server first.`);
   const choice = chooseBrowser(config.browser ?? null, installedOnThisMachine());
   if (!choice.ok) fail(choice.message);
@@ -130,7 +133,7 @@ export async function replay(args: string[]): Promise<void> {
   const now = Date.now();
   const ctx: Context = {
     runId, root, target, browser: choice.name, base: '', startedAt: now, deadline: now, depth: 'replay', budgetMinutes: 0,
-    minSeverity: 'low', focus: null, mode: 'replay', signInVariables: signInVariableNames(),
+    minSeverity: 'low', focus: null, mode: 'replay', signInVariables: signInVariableNames(process.env, config),
   };
   writeFileSync(path.join(dir, 'context.json'), JSON.stringify(ctx, null, 2) + '\n');
 
@@ -142,6 +145,7 @@ export async function replay(args: string[]): Promise<void> {
   };
   const host = (name: string, file: string, watching = false) => runProbe({
     runDir: dir, probe: name, probeFile: file, target, browser: choice.name, signInVariables: ctx.signInVariables, shotsDir: path.join(dir, 'shots'),
+    network: hostPolicy(config, name === SIGNIN),
     ...(watching ? { headed: true, slowMo: WATCH_SLOW_MO_MS, keepOpenMs: WATCH_KEEP_OPEN_MS } : {}),
   }).then((r) => { writeFileSync(path.join(probesDir(dir), `${name}.result.json`), JSON.stringify(r, null, 2) + '\n'); return r; });
 

@@ -21,14 +21,36 @@ Inside Claude Code:
 
 You also need Node.js 22.22 or later and Chrome, Edge or Chromium.
 
+**For a team, in one repository.** Install it at project scope instead, so it is on for everyone who works in the repository and nowhere else:
+
+```sh
+claude plugin marketplace add stillhunter/stillhunter
+claude plugin install stillhunter@stillhunter --scope project
+```
+
+That records it in `.claude/settings.json`. Add the marketplace there too and commit the file, so a teammate's Claude Code knows where the plugin comes from. With `autoUpdate` off, a new version arrives only when you update the marketplace yourself, so each one can be reviewed first:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "stillhunter": { "source": { "source": "github", "repo": "stillhunter/stillhunter" }, "autoUpdate": false }
+  },
+  "enabledPlugins": { "stillhunter@stillhunter": true }
+}
+```
+
+Each teammate then runs `claude plugin install stillhunter@stillhunter --scope project` once in their clone. See Claude Code's [plugin install scopes](https://code.claude.com/docs/en/plugins/install).
+
 ## Use
 
 1. **Start your app** on your machine, as you do when you work on it.
-2. **Tell Stillhunter where it runs** (skip this for a Nuxt app; it is found for you). Create `.stillhunter/config.json`:
+2. **Tell Stillhunter where it runs** (skip this for a Nuxt, Vite or Next dev server on its usual port; it is found for you). Create `.stillhunter/config.json`:
 
    ```json
    { "target": { "url": "http://localhost:3000" } }
    ```
+
+   Or name it in the hunt: `/stillhunter:hunt the invite dialog at http://localhost:8080`.
 
 3. **Hunt.** Make your change on a branch, then run:
 
@@ -45,9 +67,27 @@ You also need Node.js 22.22 or later and Chrome, Edge or Chromium.
    /stillhunter:replay
    ```
 
-Does your app need a sign-in? Set the test account in your shell before you start Claude Code, for example `APP_EMAIL` and `APP_PASSWORD`.
+Does your app need a sign-in? Set the test account in your shell before you start Claude Code, for example `APP_EMAIL` and `APP_PASSWORD`. To pass exactly the variables you choose, and nothing else, list them in the config: `"signIn": { "variables": ["APP_EMAIL", "APP_PASSWORD"] }`.
+
+Does your dev frontend call a staging API, or sign in through a hosted login page? Probes reach only your machine unless you list more hosts in the config, for every probe or for the sign-in only. Does your app keep data in a real database? A `reset` command puts it back before each probe, or only before each re-run. The [guide](https://github.com/stillhunter/stillhunter/blob/main/docs/guide.md#configuration) covers both, with recipes such as a Postgres snapshot restore.
 
 Use a local app with test data only: Stillhunter runs code the model writes against it.
+
+## Check the package
+
+Claude Code installs Stillhunter from npm, at the exact version the marketplace names. To check that the package is what this repository builds, build it from the tag and compare the two, file by file (here for 0.2.5):
+
+```sh
+git clone --depth 1 --branch v0.2.5 https://github.com/stillhunter/stillhunter
+(cd stillhunter && npm ci && npm run build && node scripts/pack.mjs ../built)
+npm pack stillhunter@0.2.5 --pack-destination published
+mkdir -p from-source from-npm
+tar -xzf built/stillhunter-0.2.5.tgz -C from-source
+tar -xzf published/stillhunter-0.2.5.tgz -C from-npm
+diff -r from-source/package from-npm/package && echo "same files"
+```
+
+The package's only runtime dependency is `playwright-core`, pinned to an exact version in its `npm-shrinkwrap.json`. Releases are published from the [release workflow](.github/workflows/release.yml) through npm trusted publishing, with no long-lived token. Where npmjs.com shows a provenance statement for a version, npm has checked that it was built by that workflow from the tagged commit; `npm audit signatures` checks the signatures and provenance of an installed copy.
 
 ## Learn more
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `network` in the config lets the browser reach more hosts than loopback, over https only: `allow` for every probe (a staging API, for example) and `allowForSignIn` for the sign-in probe only, until it calls `rr.saveSession()` (a hosted sign-in page). The route, the relay and the browser's proxy all enforce it; the proxy now opens HTTPS tunnels to listed hosts and still drops everything else, and it closes sign-in tunnels when the session is saved. With no `network` setting nothing changes.
+- `signIn.variables` in the config names the sign-in variables a probe gets, exactly. Without it, the name endings decide, as before. A listed variable that is not set stops `start` and `replay`, and names that change how Node or the browser run are refused.
+- `"resetBefore": "re-runs"` runs the reset only at `start`, before each proof re-run and before each replayed test, not before every hunt probe. `resetTimeoutSeconds` raises or lowers the reset's 2-minute limit (1 to 300 s). The guide adds reset recipes: a Postgres snapshot restore, a Docker Compose dump, several services and SQLite.
+- Without `target`, `start` and `replay` also find a Vite or Next dev server of this repository on its usual ports, proved by a marker file it serves. `start --url <address>` names the app for one hunt, and the hunter passes it when you give an address. When no app is found, the message says how to name it.
+- `.stillhunter/config.json` is checked when it is read: a setting with a wrong value stops the hunt and says what is wrong.
+- The README shows how to install at project scope for a team and how to check the npm package against the source.
+
 - The README's benchmark link points to the three-trial, three-arm evaluation instead of the earlier two-arm report, and summarizes its confirmed findings, kept-test validity, time and price. The guide's "Where it stands" adds the evaluation's full results table.
 
 - A claim with one failed proof re-run and another that never reached its check, or started after a failed reset or sign-in, is now could not re-run rather than intermittent.

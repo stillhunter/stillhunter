@@ -36,7 +36,8 @@ Three layers, each holding the next to its contract:
 
 3. **Containment** (the security boundary; treat changes here as security-sensitive):
    - `probe-host.mts` launches the browser and spawns `probe-child.mts` under Node's permission model (read: run folder, `dist/`, `playwright-core` only; write: scratch and shots; no child processes, workers, addons, signals; env limited to `PATH` plus sign-in variables).
-   - `relay.mts` sits between the probe and the browser and forwards only allow-listed Playwright protocol calls (no CDP sessions, no non-loopback navigation, no host file uploads, etc.).
+   - `relay.mts` sits between the probe and the browser and forwards only allow-listed Playwright protocol calls (no CDP sessions, no navigation outside loopback and the config's `network` hosts, no host file uploads, etc.).
+   - `hosts.mts` holds the host policy shared by the relay, the probe's route, `rr.request` and the browser's proxy (`gatedProxy` in `probe-host.mts`): loopback always, `network.allow` over https, `network.allowForSignIn` over https for the sign-in probe until `rr.saveSession()`.
    - `probe-child.mts` exposes the `rr` probe API and wraps page creation with the loopback-only route, request watchers and saved session. Output is masked for session and sign-in values.
    - `docs/guide.md` "What a probe can and cannot do" documents exactly what is enforced; keep it accurate when behavior changes. `SECURITY.md` points there.
 

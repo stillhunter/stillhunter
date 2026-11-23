@@ -5,11 +5,10 @@
 // prove a finding from the state the hunt found it in.
 import { spawn, spawnSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
-import type { Config } from './common.mjs';
+import { type Config, resetTimeoutMs } from './common.mjs';
 import { PROBE_TIMEOUT_MS } from './probe-host.mjs';
 import type { Before, ProbeResult } from './results.mjs';
 
-export const RESET_TIMEOUT_MS = 120_000;
 // How long a reset stopped at its time limit may take to close its output.
 const STOP_GRACE_MS = 5_000;
 
@@ -29,7 +28,7 @@ function stopAll(pid: number | undefined): void {
 // otherwise the command, how it ended and the end of what it printed. A reset
 // that runs past its time is stopped with every process it started, so none
 // of them goes on changing app data once the next probe has begun.
-export function resetApp(root: string, config: Config, timeoutMs = RESET_TIMEOUT_MS): Promise<string | null> {
+export function resetApp(root: string, config: Config, timeoutMs = resetTimeoutMs(config)): Promise<string | null> {
   const command = config.reset;
   if (!command) return Promise.resolve(null);
   return new Promise((resolve) => {
