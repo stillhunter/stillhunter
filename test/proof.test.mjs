@@ -34,7 +34,7 @@ export default async function (rr) {
   const n = fs.existsSync('hang-count') ? Number(fs.readFileSync('hang-count', 'utf8')) + 1 : 1;
   fs.writeFileSync('hang-count', String(n));
   rr.expect('answers-in-time', false, 'the hunt run answers; a re-run hangs');
-  if (n > 1 || /[\\/]proof[\\/]/.test(process.cwd())) await new Promise(() => {});
+  if (n > 1 || import.meta.url.includes('/proof/')) await new Promise(() => {});
 }
 `;
 

@@ -1,7 +1,7 @@
 // A probe runs in a child process under Node's permission model, with a
 // browser it did not launch. Each probe here tries to get out and must fail.
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer as createHttpServer } from 'node:http';
@@ -241,7 +241,7 @@ test('a real browser can use a loopback WebSocket through the probe proxy', { sk
   }`);
   try {
     const result = await runProbe({
-      runDir: dir, probe: 'websocket', probeFile, target: `http://app.localhost:${port}`, browser: browserChoice.name,
+      runDir: dir, probe: 'websocket', probeFile, target: `http://127.0.0.1:${port}`, browser: browserChoice.name,
       allowedHosts: [], signInVariables: [], shotsDir: path.join(dir, 'shots'), timeoutMs: 10_000,
     });
     assert.equal(result.error, null, result.error);
@@ -342,7 +342,9 @@ describe('containment', { skip: noBrowser, timeout: 300_000 }, () => {
     assert.ok(runId);
     const contextFile = path.join(dir, '.stillhunter', 'runs', runId, 'context.json');
     const context = JSON.parse(readFileSync(contextFile, 'utf8'));
-    assert.equal(context.root, dir, 'root is the generated repository path, not credential storage');
+    const rootStat = statSync(context.root);
+    const dirStat = statSync(dir);
+    assert.deepEqual([rootStat.dev, rootStat.ino], [dirStat.dev, dirStat.ino], 'root is the generated repository path, not credential storage');
     const { root, ...persistedContext } = context;
     const persistedContextText = JSON.stringify(persistedContext);
     assert.deepEqual(context.signInVariables, ['CUSTOM_TOKEN', 'SHFIX_EMAIL', 'SHFIX_PASSWORD', 'SHFIX_SHORT']);

@@ -130,7 +130,8 @@ test('controlled CLI errors redact giant credentials without throwing', (t) => {
   spawnSync('git', ['init', '-q'], { cwd: dir });
   mkdirSync(path.join(dir, '.stillhunter'));
   writeFileSync(path.join(dir, '.stillhunter', 'config.json'), JSON.stringify({ auth: { env: ['GIANT_TOKEN'] } }));
-  const secret = 'x'.repeat(40_000);
+  // Windows cannot spawn a process whose command line exceeds 32,767 characters.
+  const secret = 'x'.repeat(20_000);
   const r = run(['start', '--minutes', secret], { cwd: dir, env: { ...process.env, GIANT_TOKEN: secret } });
   assert.equal(r.status, 1, r.stderr);
   assert.equal(r.stderr, '');

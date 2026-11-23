@@ -155,7 +155,7 @@ The app can keep using its fixed test connection because the database name does 
 
 Unknown keys and malformed known fields stop the runner with `Invalid .stillhunter/config.json` and the exact field path. Unknown-key errors list the allowed keys. `hosts.allow` and `auth.env` must be arrays of strings, and each `auth.env` entry must be an environment-variable identifier matching `[A-Za-z_][A-Za-z0-9_]*`; verification settings must be positive integers. Keep credential values out of this file: `auth.env` names the variables to read from the environment.
 
-Sign-in credentials otherwise come from environment variables whose names end in `EMAIL`, `USER`, `USERNAME`, `LOGIN`, `PASSWORD` or `PASS`. `start` prints their names, never their values.
+Sign-in credentials otherwise come from environment variables whose names end in `EMAIL`, `USER`, `USERNAME`, `LOGIN`, `PASSWORD` or `PASS`, except the operating-system account variables `USER`, `USERNAME` and `LOGNAME`. Explicit `auth.env` entries can still use those names. `start` prints the selected names, never their values.
 
 ## What a probe can and cannot do
 

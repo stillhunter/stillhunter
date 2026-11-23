@@ -8,9 +8,9 @@ import { signInVariableNames } from '../dist/common.mjs';
 import { childEnv, LINUX_PLATFORM_FILES, NODE_NET_PERMISSION, permissionArgs, redact, REDACTED, sessionValues } from '../dist/probe-host.mjs';
 
 test('explicit auth.env replaces convention discovery, while omitted auth preserves it', () => {
-  const env = { APP_EMAIL: 'a@b.c', APP_PASSWORD: 'pw', CUSTOM_TOKEN: 'token', OTHER_LOGIN: 'other', EMPTY_TOKEN: '' };
-  assert.deepEqual(signInVariableNames(env), ['APP_EMAIL', 'APP_PASSWORD', 'OTHER_LOGIN']);
-  assert.deepEqual(signInVariableNames(env, ['CUSTOM_TOKEN', 'APP_PASSWORD', 'MISSING', 'CUSTOM_TOKEN', 'EMPTY_TOKEN']), ['APP_PASSWORD', 'CUSTOM_TOKEN', 'EMPTY_TOKEN']);
+  const env = { APP_EMAIL: 'a@b.c', APP_PASSWORD: 'pw', APP_USERNAME: 'app-user', CUSTOM_TOKEN: 'token', OTHER_LOGIN: 'other', EMPTY_TOKEN: '', USERNAME: 'windows-account', USER: 'posix-account', LOGNAME: 'posix-account' };
+  assert.deepEqual(signInVariableNames(env), ['APP_EMAIL', 'APP_PASSWORD', 'APP_USERNAME', 'OTHER_LOGIN']);
+  assert.deepEqual(signInVariableNames(env, ['CUSTOM_TOKEN', 'APP_PASSWORD', 'USERNAME', 'MISSING', 'CUSTOM_TOKEN', 'EMPTY_TOKEN']), ['APP_PASSWORD', 'CUSTOM_TOKEN', 'EMPTY_TOKEN', 'USERNAME']);
   assert.deepEqual(signInVariableNames(env, []), []);
 });
 

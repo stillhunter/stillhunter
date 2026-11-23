@@ -259,7 +259,7 @@ export function secretFile(file: string): boolean {
 export function signInVariableNames(env: NodeJS.ProcessEnv = process.env, configured?: readonly string[]): string[] {
   if (configured) return [...new Set(configured)].filter((name) => Object.hasOwn(env, name) && typeof env[name] === 'string').sort();
   return Object.keys(env)
-    .filter((k) => /(EMAIL|USER(NAME)?|LOGIN|PASSWORD|PASS)$/.test(k) && !/^(npm_|HOMEBREW|LOGNAME$|USER$)/.test(k))
+    .filter((k) => /(EMAIL|USER(NAME)?|LOGIN|PASSWORD|PASS)$/.test(k) && !/^(npm_|HOMEBREW|LOGNAME$|USER(NAME)?$)/.test(k))
     .sort();
 }
 

@@ -57,7 +57,7 @@ const GONE = `import fs from 'node:fs';
 export default async function (rr) {
   const n = fs.existsSync('gone-count') ? Number(fs.readFileSync('gone-count', 'utf8')) + 1 : 1;
   fs.writeFileSync('gone-count', String(n));
-  if (n > 1 || /[\\/]proof[\\/]/.test(process.cwd())) throw new Error('the list was not there to check');
+  if (n > 1 || import.meta.url.includes('/proof/')) throw new Error('the list was not there to check');
   await rr.goto('/');
   rr.expect('list-has-three-items', false, 'two items listed');
   rr.expect('count-says-three', false, 'the count says 2');
@@ -65,10 +65,11 @@ export default async function (rr) {
 `;
 // Its host crashes on the first proof re-run only, so the runner must retry it.
 const CRASHY = `import fs from 'node:fs';
+import path from 'node:path';
 export default async function (rr) {
   const n = fs.existsSync('crashy-count') ? Number(fs.readFileSync('crashy-count', 'utf8')) + 1 : 1;
   fs.writeFileSync('crashy-count', String(n));
-  if (/[\\/]proof[\\/]crashy\.1[\\/]scratch$/.test(process.cwd())) process.exit(1);
+  if (import.meta.url.includes('/proof/') && path.basename(path.dirname(process.cwd())) === 'crashy.1') process.exit(1);
   await rr.goto('/');
   rr.expect('count-matches-list', false, 'summary says 2, list says 2, flagged anyway');
 }
@@ -588,7 +589,7 @@ export default async function (rr) {
 `).replace('  await rr.saveSession();\n', `  await rr.saveSession();\n${lines}`);
 // Saves its session on every run; from its second run on, a later step fails,
 // as one that goes on to read data would.
-const LATE_FAILING_SIGNIN = signinCounted('signin-count', "  if (n > 1 || /[\\\\/]proof[\\\\/]/.test(process.cwd())) throw new Error('a later step of the sign-in probe failed');\n");
+const LATE_FAILING_SIGNIN = signinCounted('signin-count', "  if (n > 1 || import.meta.url.includes('/proof/')) throw new Error('a later step of the sign-in probe failed');\n");
 const ITEMS_LISTED = `export default async function (rr) {
   const r = await rr.request('GET', '/api/items');
   rr.expect('items-listed', r.status === 200, 'status ' + r.status);
@@ -605,7 +606,7 @@ const LATER = `import fs from 'node:fs';
 export default async function (rr) {
   const n = fs.existsSync('later-count') ? Number(fs.readFileSync('later-count', 'utf8')) + 1 : 1;
   fs.writeFileSync('later-count', String(n));
-  if (n > 1 || /[\\/]proof[\\/]/.test(process.cwd())) throw new Error('the page was not there to check');
+  if (n > 1 || import.meta.url.includes('/proof/')) throw new Error('the page was not there to check');
   rr.expect('later-check', false, 'fails in the hunt');
 }
 `;
@@ -686,7 +687,7 @@ const FRAGILE_SIGNIN = SIGNIN_PROBE.replace('export default async function (rr) 
 export default async function (rr) {
   const n = fs.existsSync('signin-count') ? Number(fs.readFileSync('signin-count', 'utf8')) + 1 : 1;
   fs.writeFileSync('signin-count', String(n));
-  if (n > 2 || /[\\/]proof[\\/]/.test(process.cwd())) throw new Error('the sign-in form was not there');
+  if (n > 2 || import.meta.url.includes('/proof/')) throw new Error('the sign-in form was not there');
 `);
 const NEEDS_SESSION = `export default async function (rr) {
   const r = await rr.request('GET', '/api/items');
