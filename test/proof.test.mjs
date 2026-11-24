@@ -4,7 +4,7 @@
 // read while finish is still running.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 import { DECOY, HUNT, hunt, huntAsync, makeRepo, noBrowser, probe, runIdOf, SIGN_IN, SIGNIN_PROBE, startFixture } from './helpers.mjs';
@@ -177,8 +177,10 @@ export default async function (rr) {
       }
       const shots = proofResults.map((r) => r.shots[0]);
       assert.equal(new Set(shots).size, 2, 'proof attempts cannot overwrite each other\'s screenshots');
-      for (const shot of shots) {
-        assert.ok(shot.startsWith(path.join(runDir, 'proof') + path.sep), shot);
+      for (const [i, shot] of shots.entries()) {
+        const shotDir = statSync(path.dirname(shot));
+        const attemptDir = statSync(path.join(runDir, 'proof', `stateful.${i + 1}`, 'shots'));
+        assert.deepEqual([shotDir.dev, shotDir.ino], [attemptDir.dev, attemptDir.ino], `proof attempt ${i + 1} screenshot directory`);
         assert.ok(existsSync(shot), `retained proof screenshot: ${shot}`);
       }
       const saved = JSON.parse(readFileSync(path.join(runDir, 'findings.json'), 'utf8'));

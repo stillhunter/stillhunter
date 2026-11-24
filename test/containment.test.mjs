@@ -611,7 +611,7 @@ describe('containment', { skip: noBrowser, timeout: 300_000 }, () => {
     // Windows, libuv copies the variables Windows needs to start a process into
     // every child it spawns, from the parent's environment, when they are missing.
     const result = run('env', `
-      const WINDOWS = ['HOMEDRIVE', 'HOMEPATH', 'LOGONSERVER', 'SYSTEMDRIVE', 'TEMP', 'USERDOMAIN', 'USERPROFILE', 'WINDIR'];
+      const WINDOWS = ['HOMEDRIVE', 'HOMEPATH', 'LOGONSERVER', 'SYSTEMDRIVE', 'TEMP', 'USERDOMAIN', 'USERNAME', 'USERPROFILE', 'WINDIR'];
       const keys = Object.keys(process.env).map((k) => k.toUpperCase());
       rr.note('keys', keys);
       rr.expect('no-decoy', !keys.includes('SHFIX_SECRET_TOKEN'));
