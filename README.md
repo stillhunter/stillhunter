@@ -19,7 +19,7 @@ Inside Claude Code:
 /plugin install stillhunter@stillhunter
 ```
 
-You also need Node.js 22.22 or later and Chrome, Edge or Chromium.
+You need Claude Code 2.1.326 or later, Node.js 22.22 or later, and Chrome, Edge or Chromium.
 
 ## Use
 

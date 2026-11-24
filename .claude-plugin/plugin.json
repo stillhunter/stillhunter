@@ -6,5 +6,8 @@
     "name": "Stillhunter maintainers"
   },
   "license": "MIT",
+  "engines": {
+    "claude-code": ">=2.1.326"
+  },
   "repository": "https://github.com/stillhunter/stillhunter"
 }

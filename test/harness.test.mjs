@@ -62,7 +62,7 @@ test('the package the harness packs holds no benchmark, test or source folder', 
   const r = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: REPO, encoding: 'utf8', shell: process.platform === 'win32' });
   assert.equal(r.status, 0, r.stderr);
   const files = JSON.parse(r.stdout)[0].files.map((f) => f.path);
-  assert.ok(files.includes('dist/hunt.mjs') && files.includes('hooks/guard.mjs') && files.includes('agents/hunter.md'), files.join(', '));
+  assert.ok(files.includes('dist/hunt.mjs') && files.includes('hooks/guard.mjs') && files.includes('hooks/register.mjs') && files.includes('hooks/fast-path.mjs') && files.includes('agents/hunter.md'), files.join(', '));
   assert.deepEqual(files.filter((f) => /^(benchmark|test|src|docs)\//.test(f)), []);
   // Claude Code installs a plugin's packages only from a lockfile beside its
   // package.json, and npm publishes only this one.
