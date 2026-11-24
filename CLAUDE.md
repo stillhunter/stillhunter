@@ -36,8 +36,8 @@ Three layers, each holding the next to its contract:
 
 3. **Containment** (the security boundary; treat changes here as security-sensitive):
    - `probe-host.mts` launches the browser and spawns `probe-child.mts` under Node's permission model (read: run folder, `dist/`, `playwright-core` only; write: scratch and shots; no child processes, workers, addons, signals; env limited to `PATH` plus sign-in variables).
-   - `relay.mts` sits between the probe and the browser and forwards only allow-listed Playwright protocol calls (no CDP sessions, no non-loopback navigation, no host file uploads, etc.).
-   - `probe-child.mts` exposes the `rr` probe API and wraps page creation with the loopback-only route, request watchers and saved session. Output is masked for session and sign-in values.
+   - `relay.mts` sits between the probe and the browser and forwards only allow-listed Playwright protocol calls (no CDP sessions, no unauthorized navigation, no host file uploads, etc.).
+   - `probe-child.mts` exposes the `rr` probe API and wraps page creation with the authorized-hosts-only route, request watchers and saved session. Output is masked for session and sign-in values.
    - `docs/guide.md` "What a probe can and cannot do" documents exactly what is enforced; keep it accurate when behavior changes. `SECURITY.md` points there.
 
 Run outcomes are deliberately distinct: confirmed (failed both re-runs), intermittent (failed one, held in the other), could not re-run (re-run never reached its expectation, or its reset/sign-in failed when the hunt run's had not), not re-run in time. Replay has PASS / FAIL / INCONCLUSIVE (reset or sign-in failure, nonzero exit). Do not collapse these categories.
