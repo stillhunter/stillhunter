@@ -9,9 +9,9 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { FOLDER, HUNTER, namesFolder } from './fast-path.mjs';
 
-const HUNTER = 'stillhunter:hunter';
-const FOLDER = '.stillhunter';
+export { namesFolder } from './fast-path.mjs';
 
 const WRITE_REASON = `Agents can't write in ${FOLDER}/: runs and kept tests come from the runner, and specs from you. Write the spec file yourself.`;
 const SHELL_REASON = `Shell commands can't name ${FOLDER}. Read files there with the Read tool; the runner writes them.`;
@@ -35,16 +35,6 @@ function readStdin() {
 
 const segmentsOf = (p, cwd) => path.resolve(cwd, p).replace(/\\/g, '/').toLowerCase().split('/').filter(Boolean);
 const inFolder = (p, cwd) => segmentsOf(p, cwd).includes(FOLDER);
-
-// A shell line that names the folder in any spelling a shell would accept.
-// Backslashes are stripped (a shell removes `\h` to `h`) as well as turned into
-// '/', so `.still\hunter` and `.stillhunter/x` both read as the folder.
-export function namesFolder(command) {
-  const lower = command.toLowerCase();
-  const stripped = lower.replace(/["'`\\]/g, '');
-  const slashed = lower.replace(/\\/g, '/').replace(/["'`]/g, '');
-  return stripped.includes(FOLDER) || slashed.includes(FOLDER) || /\.stillh[*?[]|\.st\*|stillhu~\d/.test(slashed);
-}
 
 // This file lives in <plugin root>/hooks/, and the hunter's runner is
 // <plugin root>/dist/hunt.mjs, spelled as the skill gave it.

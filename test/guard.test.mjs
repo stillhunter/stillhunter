@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { answerKeyPath, guard, hunterBashAllowed, namesFolder, pluginRoots, repoRoot, searchInRepo, secretPath } from '../hooks/guard.mjs';
 
@@ -239,4 +239,146 @@ test('the hook prints a deny decision on stdout and always exits 0', () => {
   const bad = spawnSync(process.execPath, [GUARD], { input: 'not json', encoding: 'utf8' });
   assert.equal(bad.status, 0);
   assert.equal(bad.stdout, '');
+});
+
+async function modCall(event, { agents = [], stdout = '', processError = null } = {}) {
+  const { register } = await import('../hooks/register.mjs').catch(() => ({}));
+  assert.equal(typeof register, 'function', 'the plugin registers an in-process tool hook');
+  let handler;
+  register((name, matcher, fn) => {
+    assert.equal(name, 'tool.call');
+    assert.ok(matcher.tool.includes(event.tool));
+    handler = fn;
+    return { catch() {} };
+  });
+  const files = new Map();
+  const processes = [];
+  const inputs = [];
+  const agentLists = [];
+  const $ = {
+    plugin: { root: '/plugin' },
+    agent: { list: async () => { agentLists.push(true); return agents; } },
+    session: {
+      cwd: async () => '/repo',
+      id: async () => 'session-1',
+      info: async () => ({ transcriptPath: '/transcript/session-1.jsonl' }),
+    },
+    fs: { write: async (file, text) => {
+      if (text.length > 4 * 1024 * 1024) throw new Error('file is over the 4194304-byte limit');
+      files.set(file, text);
+    } },
+    process: { run: async (argv, options) => {
+      processes.push(argv);
+      inputs.push(options?.stdin);
+      if (options?.stdin?.length > 4 * 1024 * 1024) throw new Error('stdin is over the 4194304-character limit');
+      if (processError) throw processError;
+      return { stdout };
+    } },
+  };
+  let nextCalls = 0;
+  const result = await handler($, event, async () => { nextCalls += 1; return { result: 'ok' }; });
+  return { result, files, processes, inputs, agentLists, nextCalls };
+}
+
+test('irrelevant main-session and non-hunter calls stay in process', async () => {
+  for (const event of [
+    { tool: 'Read', file_path: '/repo/src/app.ts' },
+    { tool: 'Grep', pattern: 'value', path: '/repo/src' },
+    { tool: 'Glob', pattern: '**/*.ts', path: '/repo/src' },
+    { tool: 'Edit', file_path: '/repo/src/app.ts' },
+    { tool: 'Write', file_path: '/repo/src/app.ts' },
+    { tool: 'Bash', command: 'git diff main -- src' },
+    { tool: 'PowerShell', command: 'git diff main -- src' },
+  ]) {
+    const r = await modCall(event);
+    assert.deepEqual(r.processes, [], event.tool);
+    assert.deepEqual(r.agentLists, [], event.tool);
+    assert.equal(r.nextCalls, 1, event.tool);
+  }
+  const r = await modCall(
+    { tool: 'Read', file_path: '/repo/src/app.ts', agentId: 'agent-1' },
+    { agents: [{ id: 'agent-1', type: 'general-purpose' }] },
+  );
+  assert.deepEqual(r.processes, []);
+  assert.equal(r.agentLists.length, 1);
+  assert.equal(r.nextCalls, 1);
+});
+
+test('the in-process hook preserves guard metadata and maps denials', async () => {
+  const reason = 'The hunter does not read secrets.';
+  const stdout = JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: reason } });
+  const r = await modCall(
+    { tool: 'Read', file_path: '/repo/.env', tool_use_id: 'tool-1', agentId: 'hunter-1' },
+    { agents: [{ id: 'hunter-1', type: 'stillhunter:hunter' }], stdout },
+  );
+  assert.deepEqual(r.result, { deny: reason });
+  assert.equal(r.nextCalls, 0);
+  assert.equal(r.processes.length, 1);
+  assert.deepEqual(r.processes[0], ['node', '/plugin/hooks/guard.mjs', 'read']);
+  const input = JSON.parse(r.inputs[0]);
+  assert.deepEqual(input, {
+    tool_name: 'Read',
+    tool_input: { file_path: '/repo/.env' },
+    cwd: '/repo',
+    agent_type: 'stillhunter:hunter',
+    session_id: 'session-1',
+    transcript_path: '/transcript/session-1.jsonl',
+  });
+});
+
+test('oversized tool content cannot bypass a protected write denial', async () => {
+  const reason = "Agents can't write in .stillhunter/.";
+  const stdout = JSON.stringify({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: reason } });
+  const r = await modCall(
+    { tool: 'Write', file_path: '/repo/.stillhunter/specs/a.txt', content: 'x'.repeat(4 * 1024 * 1024 + 1) },
+    { stdout },
+  );
+  assert.deepEqual(r.result, { deny: reason });
+  assert.equal(r.nextCalls, 0);
+  const input = JSON.parse(r.inputs[0]);
+  assert.deepEqual(input.tool_input, { file_path: '/repo/.stillhunter/specs/a.txt' });
+});
+
+test('oversized guarded calls fail closed before the fallback transport', async () => {
+  const padding = 'x'.repeat(4 * 1024 * 1024);
+  for (const event of [
+    { tool: 'Bash', command: `cat .stillhunter/${padding}` },
+    { tool: 'PowerShell', command: `cat .stillhunter/${padding}` },
+    { tool: 'Read', file_path: `/repo/${padding}`, agentId: 'hunter-1' },
+  ]) {
+    const r = await modCall(event, { agents: [{ id: 'hunter-1', type: 'stillhunter:hunter' }] });
+    assert.equal(typeof r.result.deny, 'string', event.tool);
+    assert.equal(r.nextCalls, 0, event.tool);
+    assert.deepEqual(r.processes, [], event.tool);
+  }
+});
+
+test('protected paths, shell spellings, and unknown agents always use the full guard', async () => {
+  for (const event of [
+    { tool: 'Write', file_path: '/repo/sub/.STILLHUNTER/tests/t.mjs' },
+    { tool: 'NotebookEdit', notebook_path: '/repo/.stillhunter/specs/a.ipynb' },
+    { tool: 'Bash', command: 'cat .still\\hunter/runs/x/session.json' },
+    { tool: 'Bash', command: 'ls .st*' },
+    { tool: 'PowerShell', command: 'cat stillhu~1/config.json' },
+    { tool: 'Read', file_path: '/repo/src/app.ts', agentId: 'missing' },
+  ]) {
+    const r = await modCall(event);
+    assert.equal(r.processes.length, 1, JSON.stringify(event));
+    assert.equal(r.nextCalls, 1, 'an empty guard result lets the tool continue');
+  }
+});
+
+test('a fallback failure keeps the hook fail-open without leaving an event file', async () => {
+  const r = await modCall({ tool: 'Write', file_path: '/repo/.stillhunter/specs/a.txt' }, { processError: new Error('no node') });
+  assert.deepEqual(r.result, { result: 'ok' });
+  assert.equal(r.nextCalls, 1);
+  assert.equal(r.files.size, 0);
+});
+
+test('the plugin loads only the in-process hook on supported Claude Code versions', () => {
+  const hooks = JSON.parse(readFileSync(path.join(path.dirname(GUARD), 'hooks.json'), 'utf8'));
+  assert.deepEqual(hooks.modules, ['./register.mjs']);
+  assert.equal(hooks.hooks, undefined);
+  const manifest = JSON.parse(readFileSync(path.join(path.dirname(GUARD), '..', '.claude-plugin', 'plugin.json'), 'utf8'));
+  assert.equal(manifest.engines['claude-code'], '>=2.1.326');
 });
