@@ -4,7 +4,7 @@ The [README](../README.md) covers installing and a first hunt. This guide has th
 
 ## Requirements
 
-Claude Code (tested with 2.1.311 and 2.1.325), Node.js 22.22 or later, and Chrome, Edge or Chromium installed. In a container, run as a user listed in `/etc/passwd`: a probe gets no `HOME`, so Node looks up the home folder there, and a user ID with no entry makes every probe fail with `uv_os_homedir returned ENOENT`.
+Claude Code 2.1.326 or later (tested with 2.1.331), Node.js 22.22 or later, and Chrome, Edge or Chromium installed. In a container, run as a user listed in `/etc/passwd`: a probe gets no `HOME`, so Node looks up the home folder there, and a user ID with no entry makes every probe fail with `uv_os_homedir returned ENOENT`.
 
 ## A report
 

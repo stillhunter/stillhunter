@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.6 (2026-11-25)
+
 - The tool guard runs inside Claude Code. Ordinary tool calls no longer start Node. The full Node guard still checks the hunter and any call that may touch `.stillhunter/`. This requires Claude Code 2.1.326 or later.
 
 - The README's benchmark link points to the three-trial, three-arm evaluation instead of the earlier two-arm report, and summarizes its confirmed findings, kept-test validity, time and price. The guide's "Where it stands" adds the evaluation's full results table.

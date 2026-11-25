@@ -111,6 +111,22 @@ test('the published lockfile pins every dependency package.json names, from the 
   }
 });
 
+test('the release metadata agrees and its Claude Code supports the plugin', () => {
+  const pkg = JSON.parse(readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+  const plugin = JSON.parse(readFileSync(path.join(REPO, '.claude-plugin/plugin.json'), 'utf8'));
+  const marketplace = JSON.parse(readFileSync(path.join(REPO, '.claude-plugin/marketplace.json'), 'utf8'));
+  const readme = readFileSync(path.join(REPO, 'README.md'), 'utf8');
+  const workflow = readFileSync(path.join(REPO, '.github/workflows/release.yml'), 'utf8');
+  assert.equal(plugin.version, pkg.version);
+  assert.equal(marketplace.plugins[0].source.version, pkg.version);
+  const imageTags = [...readme.matchAll(/raw\.githubusercontent\.com\/stillhunter\/stillhunter\/(v[^/]+)\//g)].map((m) => m[1]);
+  assert.ok(imageTags.length > 0);
+  for (const tag of imageTags) assert.equal(tag, `v${pkg.version}`);
+  const required = plugin.engines['claude-code'].match(/\d+\.\d+\.\d+/)[0];
+  const tested = workflow.match(/@anthropic-ai\/claude-code@(\d+\.\d+\.\d+)/)[1];
+  assert.ok(tested.localeCompare(required, 'en', { numeric: true }) >= 0, `${tested} does not support ${required}`);
+});
+
 // The comparison runs on macOS and Linux: it stops a session by its process
 // group, and starts claude without a shell, which on Windows cannot run this
 // stand-in script.

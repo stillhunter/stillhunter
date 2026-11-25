@@ -2,9 +2,9 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/stillhunter/stillhunter/v0.2.5/docs/media/hero-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/stillhunter/stillhunter/v0.2.5/docs/media/hero-light.webp">
-    <img src="https://raw.githubusercontent.com/stillhunter/stillhunter/v0.2.5/docs/media/hero-light.webp" width="830" alt="Stillhunter hunting a change to a watering app: the app splits into glass layers, a lens faults its requests with a 500, a slow reply and a malformed reply, then types -5 into the litres field. The total turns to -5 L, the bug is reproduced 2 of 2 times, confirmed as MEDIUM and kept as a test.">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/stillhunter/stillhunter/v0.2.6/docs/media/hero-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/stillhunter/stillhunter/v0.2.6/docs/media/hero-light.webp">
+    <img src="https://raw.githubusercontent.com/stillhunter/stillhunter/v0.2.6/docs/media/hero-light.webp" width="830" alt="Stillhunter hunting a change to a watering app: the app splits into glass layers, a lens faults its requests with a 500, a slow reply and a malformed reply, then types -5 into the litres field. The total turns to -5 L, the bug is reproduced 2 of 2 times, confirmed as MEDIUM and kept as a test.">
   </picture>
 </p>
 
