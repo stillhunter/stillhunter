@@ -59,7 +59,7 @@ jobs:
       - name: Install the tarball and validate the plugin
         shell: bash
         run: |
-          npm install --global @anthropic-ai/claude-code@2.1.311
+          npm install --global @anthropic-ai/claude-code@2.1.331
           mkdir unpacked && tar -xzf tarball/stillhunter-*.tgz -C unpacked
           (cd unpacked/package && npm install --omit=dev --ignore-scripts --no-audit --no-fund)
           claude plugin validate --strict unpacked/package
